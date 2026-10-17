@@ -12,6 +12,12 @@
 > **Phase 0.1 — review fixes applied:** MIT `LICENSE`, automatic local `.env` loading with
 > process-environment precedence, and portable dependency-origin tests. See
 > [docs/PHASE0.1-REVIEW-FIXES.md](docs/PHASE0.1-REVIEW-FIXES.md).
+>
+> **Phase 1A — offline failure lab implemented:** deterministic healthy/faulty workload, real-HTTP
+> probe with structured evidence, Kubernetes manifests for the future `trafficfuse-lab` cluster, and
+> safety-guarded (offline) lifecycle tooling — 83 offline tests green. No cluster has been created
+> or touched. See [docs/PHASE1A-REPORT.md](docs/PHASE1A-REPORT.md) and
+> [docs/PHASE1A-DESIGN.md](docs/PHASE1A-DESIGN.md).
 
 ## What TrafficFuse AI is
 
@@ -75,6 +81,21 @@ uv run uvicorn trafficfuse.api.app:app --reload
 curl http://127.0.0.1:8000/health
 ```
 
+## Failure lab (offline — Phase 1A)
+
+The synthetic workload, real-HTTP probe, and guarded lifecycle planner run without any cluster:
+
+```bash
+uv run python -m trafficfuse.lab.service                                   # healthy workload on :8080
+TRAFFICFUSE_LAB_MODE=faulty uv run python -m trafficfuse.lab.service       # ~50% deterministic 500s
+uv run python -m trafficfuse.lab.lifecycle_cli preflight \
+    --kubeconfig .runtime/kubeconfig/trafficfuse-lab.yaml                  # non-mutating Phase 1B plan
+```
+
+Cluster execution (`trafficfuse-lab`), image build/load, and the future
+`reroute_service_traffic` tool are **not** implemented in Phase 1A and require explicit
+authorization (docs/PHASE1-PREFLIGHT.md, docs/PHASE1A-REPORT.md).
+
 ## Repository layout
 
 ```text
@@ -90,14 +111,20 @@ trafficfuse-ai/
 │   ├── application/          # orchestration services — Phase 2/3, intentionally empty
 │   ├── domain/               # domain model — Phase 1, intentionally empty
 │   ├── infrastructure/       # external integrations: pinned runtime surface (Phase 0)
-│   └── config/               # environment-based settings, no secrets in source
-├── tests/                    # offline smoke tests
+│   ├── config/               # environment-based settings, no secrets in source
+│   └── lab/                  # Phase 1A: synthetic workload, fault policy, probe, lifecycle guards
+├── deploy/lab/               # Kubernetes manifests for the future trafficfuse-lab cluster (Phase 1B apply)
+├── tests/                    # offline tests (dependency, API, lab service, probe, manifests, guards)
 └── docs/
     ├── PRODUCT-BRIEF.md
     ├── ARCHITECTURE.md
     ├── COMPETITION.md
     ├── PHASES.md
-    └── PHASE0-REPORT.md
+    ├── PHASE0-REPORT.md
+    ├── PHASE0.1-REVIEW-FIXES.md
+    ├── PHASE1A-DESIGN.md
+    ├── PHASE1A-REPORT.md
+    └── PHASE1-PREFLIGHT.md
 ```
 
 ## Documentation
@@ -107,6 +134,10 @@ trafficfuse-ai/
 - [docs/COMPETITION.md](docs/COMPETITION.md) — verified official requirements, unknowns, disclosures
 - [docs/PHASES.md](docs/PHASES.md) — roadmap and acceptance gates
 - [docs/PHASE0-REPORT.md](docs/PHASE0-REPORT.md) — executed verification evidence
+- [docs/PHASE0.1-REVIEW-FIXES.md](docs/PHASE0.1-REVIEW-FIXES.md) — review fixes and git reconciliation
+- [docs/PHASE1-PREFLIGHT.md](docs/PHASE1-PREFLIGHT.md) — read-only environment findings, cluster design
+- [docs/PHASE1A-DESIGN.md](docs/PHASE1A-DESIGN.md) — failure-lab design and topology
+- [docs/PHASE1A-REPORT.md](docs/PHASE1A-REPORT.md) — Phase 1A implementation evidence
 
 ## License
 

@@ -19,6 +19,16 @@ without authorization; docs complete.
 
 ## Phase 1 — Kubernetes Failure Lab
 
+**Phase 1A (offline implementation): PASS** — synthetic workload with deterministic fault
+injection, real-HTTP probe with structured evidence, `deploy/lab` manifests for the future
+cluster, safety-guarded lifecycle tooling (dedicated kubeconfig, exact context, ownership
+receipt), standardized identity (`trafficfuse-lab` / `kind-trafficfuse-lab` /
+`trafficfuse-system`); 83 offline tests green; no cluster created or touched.
+See docs/PHASE1A-DESIGN.md and docs/PHASE1A-REPORT.md.
+
+**Phase 1B (real cluster execution): PARTIAL — requires explicit authorization.** Remaining:
+cluster creation, image build/load, and running the probe scenarios against the live Services.
+
 Goal: a real isolated **Kind** environment with a healthy and a faulty service version and
 reproducible HTTP 500 failure evidence; evidence collection service.
 

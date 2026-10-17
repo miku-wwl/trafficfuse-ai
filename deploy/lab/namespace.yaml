@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: trafficfuse-system
+  labels:
+    app.kubernetes.io/name: trafficfuse
+    app.kubernetes.io/part-of: trafficfuse
+    app.kubernetes.io/managed-by: trafficfuse-lab
+    trafficfuse.io/owner: trafficfuse-lab
+  annotations:
+    trafficfuse.io/manifest-source: deploy/lab/namespace.yaml

@@ -1,0 +1,55 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: trafficfuse-healthy
+  namespace: trafficfuse-system
+  labels:
+    app.kubernetes.io/name: trafficfuse
+    app.kubernetes.io/part-of: trafficfuse
+    app.kubernetes.io/managed-by: trafficfuse-lab
+    trafficfuse.io/owner: trafficfuse-lab
+    app.kubernetes.io/version: healthy
+  annotations:
+    trafficfuse.io/manifest-source: deploy/lab/healthy-deployment.yaml
+    trafficfuse.io/role: healthy-version
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: trafficfuse
+      version: healthy
+  template:
+    metadata:
+      labels:
+        app: trafficfuse
+        version: healthy
+        app.kubernetes.io/name: trafficfuse
+        app.kubernetes.io/part-of: trafficfuse
+        app.kubernetes.io/managed-by: trafficfuse-lab
+        trafficfuse.io/owner: trafficfuse-lab
+    spec:
+      containers:
+        - name: lab-service
+          image: trafficfuse-lab-service:phase1a
+          imagePullPolicy: IfNotPresent
+          command: ["python", "-m", "trafficfuse.lab.service"]
+          env:
+            - name: TRAFFICFUSE_LAB_MODE
+              value: healthy
+            - name: TRAFFICFUSE_LAB_PORT
+              value: "8080"
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 128Mi

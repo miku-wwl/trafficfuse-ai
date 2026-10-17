@@ -1,0 +1,28 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: trafficfuse-live
+  namespace: trafficfuse-system
+  labels:
+    app.kubernetes.io/name: trafficfuse
+    app.kubernetes.io/part-of: trafficfuse
+    app.kubernetes.io/managed-by: trafficfuse-lab
+    trafficfuse.io/owner: trafficfuse-lab
+    trafficfuse.io/role: live-entrypoint
+  annotations:
+    trafficfuse.io/manifest-source: deploy/lab/service-live.yaml
+    # Initial routing intentionally points at the faulty version: the
+    # reproducible degraded scenario. The traffic switch (Phase 3 only) moves
+    # this selector to version=healthy via the trusted reroute_service_traffic
+    # tool. Phase 1A must NOT implement that mutation.
+    trafficfuse.io/initial-selector: version=faulty
+spec:
+  type: ClusterIP
+  selector:
+    app: trafficfuse
+    version: faulty
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      protocol: TCP

@@ -1,0 +1,14 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Baseline lab stack. The probe Job (probe-job.yaml) is intentionally excluded
+# and applied on demand so evidence collection runs only when a scenario starts.
+resources:
+  - namespace.yaml
+  - healthy-deployment.yaml
+  - faulty-deployment.yaml
+  - service-live.yaml
+  - service-versions.yaml
+
+commonLabels:
+  app.kubernetes.io/part-of: trafficfuse

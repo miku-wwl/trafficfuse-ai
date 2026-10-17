@@ -22,6 +22,7 @@ venv/
 *.db
 .local/
 local/
+.runtime/
 *.log
 
 # Node / frontend build output (future phases)

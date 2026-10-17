@@ -1,0 +1,61 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: trafficfuse-probe
+  namespace: trafficfuse-system
+  labels:
+    app.kubernetes.io/name: trafficfuse
+    app.kubernetes.io/part-of: trafficfuse
+    app.kubernetes.io/managed-by: trafficfuse-lab
+    trafficfuse.io/owner: trafficfuse-lab
+    trafficfuse.io/role: probe
+  annotations:
+    trafficfuse.io/manifest-source: deploy/lab/probe-job.yaml
+    # Applied on demand (excluded from kustomization.yaml) so probes run only
+    # when an operator starts a scenario. The probe is read-only: it performs
+    # HTTP GETs against the live/version Services and writes JSON evidence.
+spec:
+  backoffLimit: 1
+  template:
+    metadata:
+      labels:
+        app: trafficfuse
+        trafficfuse.io/owner: trafficfuse-lab
+        trafficfuse.io/role: probe
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: probe
+          image: trafficfuse-lab-service:phase1a
+          imagePullPolicy: IfNotPresent
+          command: ["python", "-m", "trafficfuse.lab.probe_cli"]
+          args:
+            - --url
+            - http://trafficfuse-live.trafficfuse-system.svc.cluster.local
+            - --path
+            - /checkout
+            - --scenario-id
+            - phase1b-live
+            - --target-label
+            - service:trafficfuse-live
+            - --requests
+            - "40"
+            - --concurrency
+            - "4"
+            - --timeout
+            - "5"
+            - --output
+            - /evidence/probe-live.json
+          volumeMounts:
+            - name: evidence
+              mountPath: /evidence
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 128Mi
+      volumes:
+        - name: evidence
+          emptyDir: {}

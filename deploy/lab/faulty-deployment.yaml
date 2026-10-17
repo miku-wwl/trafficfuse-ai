@@ -1,0 +1,57 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: trafficfuse-faulty
+  namespace: trafficfuse-system
+  labels:
+    app.kubernetes.io/name: trafficfuse
+    app.kubernetes.io/part-of: trafficfuse
+    app.kubernetes.io/managed-by: trafficfuse-lab
+    trafficfuse.io/owner: trafficfuse-lab
+    app.kubernetes.io/version: faulty
+  annotations:
+    trafficfuse.io/manifest-source: deploy/lab/faulty-deployment.yaml
+    trafficfuse.io/role: faulty-version
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: trafficfuse
+      version: faulty
+  template:
+    metadata:
+      labels:
+        app: trafficfuse
+        version: faulty
+        app.kubernetes.io/name: trafficfuse
+        app.kubernetes.io/part-of: trafficfuse
+        app.kubernetes.io/managed-by: trafficfuse-lab
+        trafficfuse.io/owner: trafficfuse-lab
+    spec:
+      containers:
+        - name: lab-service
+          image: trafficfuse-lab-service:phase1a
+          imagePullPolicy: IfNotPresent
+          command: ["python", "-m", "trafficfuse.lab.service"]
+          env:
+            - name: TRAFFICFUSE_LAB_MODE
+              value: faulty
+            - name: TRAFFICFUSE_LAB_FAULT_RATE_PERCENT
+              value: "50"
+            - name: TRAFFICFUSE_LAB_PORT
+              value: "8080"
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 128Mi

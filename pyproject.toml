@@ -8,6 +8,8 @@ license = { text = "MIT" }
 dependencies = [
     # Backend foundation for the consumer application (Phase 0 brief, Step 3).
     "fastapi>=0.115",
+    # Consumer-owned HTTP probes (read-only measurements) and TestClient.
+    "httpx>=0.27",
     # Loads an optional local, git-ignored .env at startup. The process
     # environment always takes precedence (dotenv override=False); the file is
     # never executed as code. See src/trafficfuse/config/settings.py.
@@ -23,9 +25,9 @@ dependencies = [
 dev = [
     "pytest>=8,<9",
     # Required by fastapi.testclient.TestClient for the offline health smoke test.
-    "httpx>=0.27",
-    # Local development ASGI server: uv run uvicorn trafficfuse.api.app:app
     "uvicorn>=0.30",
+    # Offline Kubernetes manifest validation in tests (no cluster contact).
+    "pyyaml>=6.0",
 ]
 
 [build-system]

@@ -1,0 +1,47 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: trafficfuse-faulty
+  namespace: trafficfuse-system
+  labels:
+    app.kubernetes.io/name: trafficfuse
+    app.kubernetes.io/part-of: trafficfuse
+    app.kubernetes.io/managed-by: trafficfuse-lab
+    trafficfuse.io/owner: trafficfuse-lab
+    trafficfuse.io/role: version-endpoint
+  annotations:
+    trafficfuse.io/manifest-source: deploy/lab/service-versions.yaml
+spec:
+  type: ClusterIP
+  selector:
+    app: trafficfuse
+    version: faulty
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      protocol: TCP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: trafficfuse-healthy
+  namespace: trafficfuse-system
+  labels:
+    app.kubernetes.io/name: trafficfuse
+    app.kubernetes.io/part-of: trafficfuse
+    app.kubernetes.io/managed-by: trafficfuse-lab
+    trafficfuse.io/owner: trafficfuse-lab
+    trafficfuse.io/role: version-endpoint
+  annotations:
+    trafficfuse.io/manifest-source: deploy/lab/service-versions.yaml
+spec:
+  type: ClusterIP
+  selector:
+    app: trafficfuse
+    version: healthy
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      protocol: TCP
