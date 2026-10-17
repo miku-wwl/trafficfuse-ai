@@ -8,6 +8,13 @@ synthetic-metrics rule).
 Evidence is structured JSON with a per-request raw record retained for
 auditability. The same component runs offline (in-process ASGI transport in
 tests) and later inside the isolated Kind cluster (Job with the lab image).
+
+Every request is stamped with the probe's deterministic sequence number
+(``X-TrafficFuse-Request-Index``) so the lab service can apply the exact
+configured fault distribution even when the Service load-balances across
+several faulty Pods. This is a measurement input, not a measured outcome: the
+observed error rate in the evidence is still computed solely from real
+responses.
 """
 
 from __future__ import annotations
@@ -22,8 +29,16 @@ from typing import Any
 
 import httpx
 
+from trafficfuse.lab.fault import REQUEST_INDEX_HEADER
+
 PROBE_EVIDENCE_SCHEMA = "trafficfuse-probe-evidence-v1"
 EVIDENCE_SOURCE = "real_http_responses"
+
+# The probe stamps every request with its own deterministic sequence number.
+# The lab service uses it (when valid) so the configured fault distribution is
+# exact across multiple faulty Pods; an absent or invalid index simply
+# degrades the service to its per-process counter. See lab/fault.py.
+REQUEST_INDEX_HEADER_NAME = REQUEST_INDEX_HEADER
 
 OUTCOME_SUCCESS = "success"
 OUTCOME_HTTP_ERROR = "http_error"
@@ -145,7 +160,10 @@ async def _single_request(
 ) -> ProbeRecord:
     start = time.perf_counter()
     try:
-        response = await client.get(config.target_url)
+        response = await client.get(
+            config.target_url,
+            headers={REQUEST_INDEX_HEADER_NAME: str(sequence)},
+        )
     except httpx.TimeoutException as exc:
         duration_ms = (time.perf_counter() - start) * 1000
         return ProbeRecord(

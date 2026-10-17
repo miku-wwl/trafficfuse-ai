@@ -60,12 +60,12 @@ changed; no images pulled.
 | --- | --- |
 | Cluster name | `trafficfuse-lab` (unique, TrafficFuse-owned; context `kind-trafficfuse-lab`) |
 | Topology | single-node kind cluster (default `kindest/node`), local registry not required |
-| Namespaces | `trafficfuse-demo` (application), `trafficfuse-evidence` (probes/tests) — the `default` namespace is never used |
-| Workloads | one demo image deployed twice: `svc-healthy` (HTTP 200) and `svc-faulty` (deterministic, reproducible 500 rate via ConfigMap/env flag) |
-| Failure injection | env/ConfigMap-driven fault switch — reproducible rate, no randomness across runs unless seeded |
-| Probes | consumer-owned HTTP prober (Python) against ClusterIP/Service, recording status codes and latency per version |
+| Namespace | `trafficfuse-system` — standardized in Phase 1A, **superseding** the earlier `trafficfuse-demo`/`trafficfuse-evidence` proposal; the `default` namespace is never used |
+| Workloads | `trafficfuse-healthy` (HTTP 200) and `trafficfuse-faulty` (deterministic, exact configured 500 rate — Phase 1A.1 matrix) from the shared image `trafficfuse-lab-service:phase1a` |
+| Failure injection | env-driven fault switch (`TRAFFICFUSE_LAB_FAULT_RATE_PERCENT`) — exact deterministic rate, no randomness across runs |
+| Probes | consumer-owned HTTP prober (Python) against the live/version Services, recording status codes and latency per version, with `X-TrafficFuse-Request-Index` for exact cross-Pod distribution |
 | Measurements | error rate and latency (before/after), persisted as real incident evidence; synthetic data never presented as real |
-| Cleanup | `kind delete cluster --name trafficfuse-lab` only, guarded by exact-name checks; helpers for observed-only inspection |
+| Cleanup | `kind delete cluster --name trafficfuse-lab` only, guarded by exact-name checks **and verified ownership evidence**; helpers for observed-only inspection |
 
 ## 4. Required permissions (explicit user approval needed)
 
@@ -107,3 +107,15 @@ changed; no images pulled.
 and usable ports. It is **not READY** only because Phase 1 requires an explicit
 cluster-creation approval and the ambient Kubernetes context is foreign to this
 project; both are conditions for authorization, not environment gaps.
+
+## 8. Phase 1B workflow (documentation only — not executed)
+
+After Phase 1A.1 hardening (docs/PHASE1A1-HARDENING-REPORT.md), Phase 1B requires
+the same explicit authorizations above **plus** a real image build (offline build
+was impossible: no staged wheels). The exact proposed sequence — image
+build/load, cluster creation with the dedicated kubeconfig, namespace and
+manifest application, creation-record write, ownership verification, probe
+scenarios, evidence export to `artifacts/phase1b/<run-id>/`, and name-pinned
+ownership-verified cleanup — is specified in the hardening report §7. Every
+kubectl invocation carries `--kubeconfig .runtime/kubeconfig/trafficfuse-lab.yaml
+--context kind-trafficfuse-lab` explicitly; the ambient context is never used.

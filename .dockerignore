@@ -1,0 +1,35 @@
+# Docker build context excludes (context: repository root).
+# The image needs only src/trafficfuse and deploy/lab; everything else is
+# excluded to keep the build reproducible, small and free of local state.
+
+# Version control and local agent state
+.git
+.workbuddy-ai
+.runtime
+
+# Python environments and caches
+.venv
+__pycache__
+**/__pycache__
+*.pyc
+*.pyo
+.pytest_cache
+.mypy_cache
+.ruff_cache
+
+# Local configuration and secrets (never enter an image)
+.env
+.env.*
+!.env.example
+
+# Not required by the lab image
+tests
+docs
+artifacts
+build
+
+# Editor and OS noise
+.vscode
+.idea
+Thumbs.db
+desktop.ini

@@ -23,22 +23,24 @@ def _get(app, path: str) -> httpx.Response:
 # --- fault policy ------------------------------------------------------------
 
 
-def test_fault_policy_intervals() -> None:
-    assert FaultPolicy(0).failure_interval == 0
-    assert FaultPolicy(100).failure_interval == 1
-    assert FaultPolicy(50).failure_interval == 2
-    assert FaultPolicy(30).failure_interval == 3
-    assert FaultPolicy(25).failure_interval == 4
+def test_fault_policy_exact_rate_over_100_requests() -> None:
+    # Phase 1A.1 (finding P2): a complete 100-request sequence at configured
+    # integer rate P produces exactly P failures — no interval approximation.
+    for rate in (0, 1, 10, 25, 30, 45, 50, 75, 90, 99, 100):
+        policy = FaultPolicy(rate)
+        failures = sum(policy.should_fail(n) for n in range(1, 101))
+        assert failures == rate, f"rate {rate}% realized {failures} failures"
 
 
-def test_fault_policy_never_overshoots_high_rates() -> None:
-    # Rates above 50% stabilise at ~50% rather than overshooting to 100%.
-    assert FaultPolicy(75).failure_interval == 2
+def test_fault_policy_high_rates_no_longer_capped() -> None:
+    # Previous defect (finding P2): rates above 50% stabilised at ~50%. The
+    # corrected policy realizes exactly 75 failures per 100 requests at 75%.
     policy = FaultPolicy(75)
+    assert sum(policy.should_fail(n) for n in range(1, 101)) == 75
     assert [policy.should_fail(n) for n in range(1, 7)] == [
         False,
         True,
-        False,
+        True,
         True,
         False,
         True,
@@ -132,3 +134,47 @@ def test_faulty_error_body_is_labelled_synthetic() -> None:
     assert response.status_code == 500
     assert response.json()["synthetic"] is True
     assert "synthetic" in response.json()["detail"]
+
+
+# --- probe-driven request index -------------------------------------------------
+
+
+def _get_with_index(app, path: str, index: str | None) -> httpx.Response:
+    async def _run() -> httpx.Response:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://trafficfuse-lab"
+        ) as client:
+            headers = (
+                {"X-TrafficFuse-Request-Index": index} if index is not None else {}
+            )
+            return await client.get(path, headers=headers)
+
+    return asyncio.run(_run())
+
+
+def test_header_index_drives_deterministic_fault_decision() -> None:
+    # At 50%, the exact distribution fails on every second 0-based index, so
+    # probe sequence 1..10 map to 500,200,500,... regardless of arrival order.
+    app = create_lab_app(mode=MODE_FAULTY, fault_rate_percent=50)
+    statuses = []
+    for index in range(1, 11):
+        response = _get_with_index(app, "/checkout", str(index))
+        statuses.append(response.status_code)
+        assert response.json()["request_sequence"] == "header"
+        assert response.json()["request_number"] == index
+    assert statuses == [200, 500, 200, 500, 200, 500, 200, 500, 200, 500]
+    # Exact realized count over the complete sequence.
+    assert statuses.count(500) == 5
+
+
+def test_missing_or_invalid_header_falls_back_deterministically() -> None:
+    app = create_lab_app(mode=MODE_FAULTY, fault_rate_percent=50)
+    # Missing header: per-process counter, still exactly 5/10 at 50%.
+    fallback = [_get_with_index(app, "/checkout", None) for _ in range(10)]
+    assert [r.status_code for r in fallback].count(500) == 5
+    assert all(r.json()["request_sequence"] == "local-counter" for r in fallback)
+    # Invalid header values are ignored the same way.
+    for bad in ("", "abc", "-3", "0", "1.5", "999999999999999999999999"):
+        response = _get_with_index(app, "/checkout", bad)
+        assert response.json()["request_sequence"] == "local-counter"

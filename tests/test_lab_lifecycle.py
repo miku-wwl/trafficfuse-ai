@@ -5,6 +5,7 @@ modifies any cluster, context or resource; mutating plan functions refuse even
 when authorized, because Phase 1A is an offline phase.
 """
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -15,6 +16,8 @@ from trafficfuse.lab.lifecycle import (
     CLUSTER_NAME,
     EXPECTED_CONTEXT,
     NAMESPACE,
+    RECORD_SCHEMA,
+    ClusterFacts,
     SafetyViolation,
     build_preflight_plan,
     is_global_kubeconfig,
@@ -30,6 +33,11 @@ from trafficfuse.lab.lifecycle import (
 )
 
 DEDICATED_KUBECONFIG = ".runtime/kubeconfig/trafficfuse-lab.yaml"
+
+# Synthetic creation-record fixture values (never a real cluster identity).
+FIXTURE_API_SERVER = "https://127.0.0.1:6443"
+FIXTURE_CA_FINGERPRINT = hashlib.sha256(b"synthetic-ca-fixture").hexdigest()
+FIXTURE_NODES = ("trafficfuse-lab-control-plane",)
 
 
 def test_standard_identity_accepted() -> None:
@@ -117,15 +125,33 @@ def _write_receipt(path: Path, *, cluster: str, context: str) -> Path:
     path.write_text(
         json.dumps(
             {
+                "receipt_schema": RECORD_SCHEMA,
                 "cluster": cluster,
                 "context": context,
                 "namespace": NAMESPACE,
+                "api_server": FIXTURE_API_SERVER,
+                "ca_fingerprint_sha256": FIXTURE_CA_FINGERPRINT,
+                "kind_node_names": list(FIXTURE_NODES),
+                "created_at": "2026-10-18T10:00:00+00:00",
                 "created_by": "trafficfuse",
+                "kubeconfig": DEDICATED_KUBECONFIG,
             }
         ),
         encoding="utf-8",
     )
     return path
+
+
+def _verified_facts() -> ClusterFacts:
+    return ClusterFacts(
+        api_server=FIXTURE_API_SERVER,
+        ca_fingerprint_sha256=FIXTURE_CA_FINGERPRINT,
+        node_names=FIXTURE_NODES,
+        namespace_labels={
+            "trafficfuse.io/owner": CLUSTER_NAME,
+            "app.kubernetes.io/managed-by": CLUSTER_NAME,
+        },
+    )
 
 
 def test_destroy_requires_receipt_then_authorization_then_refuses(tmp_path: Path) -> None:
@@ -139,9 +165,35 @@ def test_destroy_requires_receipt_then_authorization_then_refuses(tmp_path: Path
         plan_cluster_destroy(
             kubeconfig_path=DEDICATED_KUBECONFIG, receipt_path=receipt, authorized=False
         )
-    with pytest.raises(SafetyViolation, match="not enabled in Phase 1A"):
+    # Authorized but without verified ownership evidence: still refused.
+    with pytest.raises(SafetyViolation, match="verified ownership evidence"):
         plan_cluster_destroy(
             kubeconfig_path=DEDICATED_KUBECONFIG, receipt_path=receipt, authorized=True
+        )
+    # Authorized with verified evidence: Phase 1A still refuses to mutate.
+    with pytest.raises(SafetyViolation, match="not enabled in Phase 1A"):
+        plan_cluster_destroy(
+            kubeconfig_path=DEDICATED_KUBECONFIG,
+            receipt_path=receipt,
+            authorized=True,
+            cluster_facts=_verified_facts(),
+        )
+
+
+def test_destroy_refuses_when_ownership_evidence_mismatches(tmp_path: Path) -> None:
+    receipt = _write_receipt(tmp_path / "cluster-trafficfuse-lab.json", cluster=CLUSTER_NAME, context=EXPECTED_CONTEXT)
+    tampered = ClusterFacts(
+        api_server="https://127.0.0.1:7777",  # different API server
+        ca_fingerprint_sha256=FIXTURE_CA_FINGERPRINT,
+        node_names=FIXTURE_NODES,
+        namespace_labels={},
+    )
+    with pytest.raises(SafetyViolation, match="ownership could not be verified"):
+        plan_cluster_destroy(
+            kubeconfig_path=DEDICATED_KUBECONFIG,
+            receipt_path=receipt,
+            authorized=True,
+            cluster_facts=tampered,
         )
 
 
@@ -173,9 +225,16 @@ def test_preflight_plan_refuses_wrong_identity() -> None:
 
 def test_no_ambient_context_dependency_in_module_source() -> None:
     # Structural guarantee: the lifecycle module never reads the ambient
-    # environment or current Kubernetes context.
+    # environment, never introspects or switches the ambient Kubernetes
+    # context, and never shells out to kubectl. Every future invocation must
+    # carry the dedicated kubeconfig and exact context explicitly
+    # (kubectl_prefix()). The dedicated kubeconfig *file*'s own current-context
+    # field is inspected offline, which is why the checks target ambient
+    # context operations rather than the substring alone.
     source = Path(lifecycle.__file__).read_text(encoding="utf-8")
     assert "os.environ" not in source
-    assert "current-context" not in source
     assert "get_contexts" not in source
     assert "kubectl config" not in source
+    assert "kubectl current" not in source
+    assert "use-context" not in source
+    assert "subprocess" not in source

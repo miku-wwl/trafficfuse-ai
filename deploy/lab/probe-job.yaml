@@ -14,6 +14,10 @@ metadata:
     # Applied on demand (excluded from kustomization.yaml) so probes run only
     # when an operator starts a scenario. The probe is read-only: it performs
     # HTTP GETs against the live/version Services and writes JSON evidence.
+    # Durable extraction (Phase 1A.1): the complete evidence document is also
+    # printed to stdout between TRAFFICFUSE_EVIDENCE_BEGIN/END markers, so
+    # `kubectl logs` yields verifiable evidence even if the emptyDir is lost.
+    # Export offline with: python -m trafficfuse.lab.evidence_cli --logs <captured>
 spec:
   backoffLimit: 1
   template:
@@ -27,7 +31,7 @@ spec:
       containers:
         - name: probe
           image: trafficfuse-lab-service:phase1a
-          imagePullPolicy: IfNotPresent
+          imagePullPolicy: Never
           command: ["python", "-m", "trafficfuse.lab.probe_cli"]
           args:
             - --url

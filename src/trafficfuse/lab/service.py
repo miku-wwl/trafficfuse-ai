@@ -7,6 +7,14 @@
 endpoint, ``/version`` identifies the faulty version, and ``/checkout`` returns
 HTTP 500 for a deterministic portion of requests (see ``fault.py``).
 
+Determinism under load: the probe sends ``X-TrafficFuse-Request-Index`` with
+its own sequence number. When present, the fault decision follows that index,
+so the exact configured distribution holds globally even when the Service
+load-balances across several faulty Pods. Any other client (or a missing /
+invalid header) falls back to a per-process counter, which yields the exact
+distribution only for single-observation sequences; this fallback is a
+degradation of *global* exactness, never of determinism.
+
 All responses are explicitly labelled synthetic. The checkout operation never
 touches a real payment or business system. Run in-cluster with::
 
@@ -19,16 +27,42 @@ from __future__ import annotations
 import itertools
 import os
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from trafficfuse import __version__
-from trafficfuse.lab.fault import DEFAULT_FAULT_RATE_PERCENT, FaultPolicy
+from trafficfuse.lab.fault import (
+    DEFAULT_FAULT_RATE_PERCENT,
+    REQUEST_INDEX_HEADER,
+    FaultPolicy,
+    _MAX_REQUEST_NUMBER,
+)
 
 MODE_HEALTHY = "healthy"
 MODE_FAULTY = "faulty"
 MODES = (MODE_HEALTHY, MODE_FAULTY)
 DEFAULT_LAB_PORT = 8080
+
+
+def _parse_request_index(raw: str | None) -> int | None:
+    """Parse an untrusted request-index header value; None when unusable.
+
+    Only a plain decimal integer within the policy's supported range is
+    accepted; anything else (missing, empty, non-numeric, negative, oversized)
+    is ignored so the caller can fall back to the process counter.
+    """
+    if raw is None:
+        return None
+    text = raw.strip()
+    if not text.isdigit():
+        return None
+    try:
+        value = int(text)
+    except ValueError:  # pragma: no cover - isdigit() already guarantees this
+        return None
+    if not 1 <= value <= _MAX_REQUEST_NUMBER:
+        return None
+    return value
 
 
 def create_lab_app(*, mode: str = MODE_HEALTHY, fault_rate_percent: int = DEFAULT_FAULT_RATE_PERCENT) -> FastAPI:
@@ -65,16 +99,23 @@ def create_lab_app(*, mode: str = MODE_HEALTHY, fault_rate_percent: int = DEFAUL
         }
 
     @app.get("/checkout")
-    async def checkout():
-        request_number = next(counter)
-        if policy.should_fail(request_number):
+    async def checkout(request: Request):
+        index = _parse_request_index(request.headers.get(REQUEST_INDEX_HEADER))
+        sequence_source = "header"
+        if index is None:
+            # Degraded global exactness: per-process counter. Still fully
+            # deterministic for any single observation sequence.
+            index = next(counter)
+            sequence_source = "local-counter"
+        if policy.should_fail(index):
             return JSONResponse(
                 status_code=500,
                 content={
                     "status": "error",
                     "synthetic": True,
                     "version": mode,
-                    "request_number": request_number,
+                    "request_number": index,
+                    "request_sequence": sequence_source,
                     "detail": "synthetic faulty checkout (deterministic fault injection)",
                 },
             )
@@ -82,8 +123,9 @@ def create_lab_app(*, mode: str = MODE_HEALTHY, fault_rate_percent: int = DEFAUL
             "status": "ok",
             "synthetic": True,
             "version": mode,
-            "request_number": request_number,
-            "transaction_id": f"synthetic-checkout-{request_number}",
+            "request_number": index,
+            "request_sequence": sequence_source,
+            "transaction_id": f"synthetic-checkout-{index}",
             "detail": "synthetic checkout success; no real payment system was touched",
         }
 

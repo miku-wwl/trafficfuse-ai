@@ -58,23 +58,36 @@ re-implemented here (AGENTS.md).
 - Pod labels: `app: trafficfuse`, `version: healthy|faulty`, plus ownership
   markers (`trafficfuse.io/owner`, `app.kubernetes.io/managed-by`).
 
-## 3. Fault injection model (deterministic)
+## 3. Fault injection model (deterministic, exact)
 
-`FaultPolicy` fails every N-th request, N derived from the configured target:
+`FaultPolicy` implements an exact Bresenham distribution over the request index `k`
+(0-based): a request fails iff `floor((k+1)·P/100) > floor(k·P/100)`.
 
-| Configured rate | Interval | Approx. realized rate |
-| --- | --- | --- |
-| 0% | never | 0% |
-| 30% | every 3rd | ~33% |
-| 50% | every 2nd | 50% |
-| 100% | every request | 100% |
-| > 50% (e.g. 75%) | every 2nd | ~50% (never overshoots) |
+| Configured rate | Realized failures per 100 requests |
+| --- | --- |
+| 0% | 0 (never) |
+| 1% | 1 |
+| 30% | 30 |
+| 50% | 50 |
+| 75% | 75 |
+| 99% | 99 |
+| 100% | 100 (always) |
 
-- No randomness anywhere: the same request numbers always produce the same
-  outcome; tests assert exact status sequences.
+- Exactly `P` failures per complete 100-request sequence (`2P`/`3P` across 200/300), evenly
+  spread, never clustered at the boundaries. (Replaces the Phase 1A interval rotation, which
+  was exact only for rates dividing 100 and capped at ~50% for higher rates — review finding
+  P2; see docs/PHASE1A1-HARDENING-REPORT.md.)
+- No randomness anywhere: the same `(rate, request_number)` pair always produces the same
+  outcome; tests assert exact status sequences over the full matrix.
+- The probe stamps every request with `X-TrafficFuse-Request-Index`. With the index, the
+  decision is a pure function of the probe's sequence number, so the exact distribution holds
+  **globally across multiple faulty Pods** behind the Service. Without it, each Pod falls
+  back to its own counter: deterministic per Pod, with a combined total bounded to within
+  ±1 request per replica. The header proves client-side exactness; it does not prove
+  distributed request ordering.
 - The configured percentage is a **policy input**, never a measurement.
-- `/ready` returns 200 in faulty mode on purpose: the Pod must remain a valid
-  Service endpoint so the failure is user-visible, not infrastructure-level.
+- `/ready` returns 200 in faulty mode on purpose: the Pod must remain a valid Service
+  endpoint so the failure is user-visible, not infrastructure-level.
 
 ## 4. Probe methodology
 
@@ -114,6 +127,15 @@ re-implemented here (AGENTS.md).
 Raw per-request records are preserved for auditability; a configured target
 percentage never appears as a measured field.
 
+**Durable representation (Phase 1A.1):** the CLI always prints the complete document to
+stdout between `TRAFFICFUSE_EVIDENCE_BEGIN` / `TRAFFICFUSE_EVIDENCE_END` markers (progress to
+stderr only), so `kubectl logs` yields verifiable evidence even if the Pod's emptyDir is lost.
+Documents are strictly validated before emission (schema, identity, counts, outcome
+classification, sequence completeness 1..total, latency, observed-rate consistency, synthetic
+declaration, timestamps). Phase 1B collection: `kubectl … logs job/trafficfuse-probe` →
+`python -m trafficfuse.lab.evidence_cli` → `artifacts/phase1b/<run-id>/` with raw logs
+preserved byte-for-byte (docs/PHASE1A1-HARDENING-REPORT.md §1).
+
 ## 6. Resource sizing (development workstation)
 
 | Resource | Requests | Limits |
@@ -131,14 +153,24 @@ inside the verified machine capacity (16 cores, 31.3 GB RAM; docs/PHASE1-PREFLIG
   closed (`Settings.validate`, lifecycle guards).
 - **Dedicated kubeconfig:** `.runtime/kubeconfig/trafficfuse-lab.yaml`
   (git-ignored). The global `~/.kube/config` and the ambient context are never
-  read or trusted; `kind`/`kubectl` must always receive explicit paths.
+  read or trusted; the path is normalized and resolved — symlink escapes and
+  traversal are refused; every kubectl invocation carries the dedicated
+  kubeconfig and exact context explicitly (`lifecycle.kubectl_prefix()`).
 - **Ownership metadata:** every manifest carries
   `trafficfuse.io/owner=trafficfuse-lab` and
   `app.kubernetes.io/managed-by=trafficfuse-lab`.
-- **Ownership receipt:** Phase 1B tooling writes
-  `.runtime/state/cluster-trafficfuse-lab.json`; destruction requires that
-  receipt (verified cluster/context/namespace) — a matching cluster *name*
-  alone is never deletion authority.
+- **Creation record (schema `trafficfuse-ownership-record-v2`):** Phase 1B
+  tooling writes `.runtime/state/cluster-trafficfuse-lab.json` containing the
+  cluster/context/namespace, the API server, the CA certificate SHA-256
+  fingerprint, the exact kind node names, creation timestamp, creator and
+  kubeconfig reference. The record is **metadata, not cryptographic proof**.
+- **Ownership verification (Phase 1A.1):** destruction requires a complete
+  creation record *and* live ownership evidence that matches it exactly — API
+  server, CA fingerprint, node identities and ownership labels — plus explicit
+  authorization. The kubeconfig document itself is verified offline (exact
+  context→cluster binding, local HTTPS API server only, CA fingerprint anchor,
+  no foreign contexts, no embedded static credentials). A matching cluster
+  *name* alone is never deletion authority.
 - **Known foreign clusters** (`incident-lab`, `pcp-dev`, `playground-crd`,
   `vmware-k8s`) are refused by name, as is any non-standard target.
 
@@ -148,8 +180,13 @@ inside the verified machine capacity (16 cores, 31.3 GB RAM; docs/PHASE1-PREFLIG
   8000/8080/8081/8443 free — **5000 is occupied** and never reserved).
 - `.env` semantics unchanged: repository `.env` auto-loaded, process environment
   always wins, credentials never in source.
-- The lab image `trafficfuse-lab-service:phase1a` is built in Phase 1B from
-  `trafficfuse.lab.service`; manifests reference it with `IfNotPresent`.
+- The lab image `trafficfuse-lab-service:phase1a` is built from
+  `deploy/lab/Dockerfile` (digest-pinned Python 3.13 base, dependency pins
+  mirroring `uv.lock`, non-root, dual entrypoints for the service and the probe
+  CLI). Manifests reference it with `imagePullPolicy: Never`; kind loads it
+  into the node (`kind load docker-image …`) in Phase 1B. The image installs
+  **no** Agentic Intent Gate — the lab package does not import it (enforced by
+  test).
 
 ## 9. Future Phase 3 traffic-switch compatibility
 

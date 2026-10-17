@@ -18,6 +18,16 @@
 > safety-guarded (offline) lifecycle tooling — 83 offline tests green. No cluster has been created
 > or touched. See [docs/PHASE1A-REPORT.md](docs/PHASE1A-REPORT.md) and
 > [docs/PHASE1A-DESIGN.md](docs/PHASE1A-DESIGN.md).
+>
+> **Phase 1A.1 — deployment readiness hardening: PASS.** Reproducible lab image definition
+> (`deploy/lab/Dockerfile`, pinned to `uv.lock`, non-root; offline build reported
+> BUILD_NOT_VERIFIED — no wheels staged, no network used), durable probe-evidence export
+> (stdout `TRAFFICFUSE_EVIDENCE_*` markers, strict validation, `artifacts/phase1b/<run-id>/`
+> collection), stronger Kubernetes ownership guards (kubeconfig document verification with a
+> CA-fingerprint anchor, v2 creation record, live-facts ownership verification, mandatory
+> negative tests), and an **exact** deterministic fault-rate algorithm (configured P% → exactly
+> P failures per 100 requests). 240 offline tests green; `AGENTS.md` and the pinned runtime
+> untouched. See [docs/PHASE1A1-HARDENING-REPORT.md](docs/PHASE1A1-HARDENING-REPORT.md).
 
 ## What TrafficFuse AI is
 
@@ -81,20 +91,31 @@ uv run uvicorn trafficfuse.api.app:app --reload
 curl http://127.0.0.1:8000/health
 ```
 
-## Failure lab (offline — Phase 1A)
+## Failure lab (offline — Phase 1A / 1A.1)
 
 The synthetic workload, real-HTTP probe, and guarded lifecycle planner run without any cluster:
 
 ```bash
 uv run python -m trafficfuse.lab.service                                   # healthy workload on :8080
-TRAFFICFUSE_LAB_MODE=faulty uv run python -m trafficfuse.lab.service       # ~50% deterministic 500s
+TRAFFICFUSE_LAB_MODE=faulty TRAFFICFUSE_LAB_FAULT_RATE_PERCENT=75 \
+    uv run python -m trafficfuse.lab.service                               # exactly 75% deterministic 500s
 uv run python -m trafficfuse.lab.lifecycle_cli preflight \
     --kubeconfig .runtime/kubeconfig/trafficfuse-lab.yaml                  # non-mutating Phase 1B plan
+uv run python -m trafficfuse.lab.lifecycle_cli verify \
+    --kubeconfig .runtime/kubeconfig/trafficfuse-lab.yaml \
+    --receipt .runtime/state/cluster-trafficfuse-lab.json --facts facts.json  # offline ownership check
+```
+
+The lab image is defined by `deploy/lab/Dockerfile` (build context: repository root):
+
+```bash
+docker build --pull -f deploy/lab/Dockerfile -t trafficfuse-lab-service:phase1a .   # Phase 1B (network required)
 ```
 
 Cluster execution (`trafficfuse-lab`), image build/load, and the future
-`reroute_service_traffic` tool are **not** implemented in Phase 1A and require explicit
-authorization (docs/PHASE1-PREFLIGHT.md, docs/PHASE1A-REPORT.md).
+`reroute_service_traffic` tool are **not** executed in Phase 1A/1A.1 and require explicit
+authorization (docs/PHASE1-PREFLIGHT.md, docs/PHASE1A-REPORT.md,
+docs/PHASE1A1-HARDENING-REPORT.md).
 
 ## Repository layout
 
@@ -113,8 +134,8 @@ trafficfuse-ai/
 │   ├── infrastructure/       # external integrations: pinned runtime surface (Phase 0)
 │   ├── config/               # environment-based settings, no secrets in source
 │   └── lab/                  # Phase 1A: synthetic workload, fault policy, probe, lifecycle guards
-├── deploy/lab/               # Kubernetes manifests for the future trafficfuse-lab cluster (Phase 1B apply)
-├── tests/                    # offline tests (dependency, API, lab service, probe, manifests, guards)
+├── deploy/lab/               # Kubernetes manifests + Dockerfile for the future trafficfuse-lab cluster (Phase 1B)
+├── tests/                    # offline tests (dependency, API, lab service, fault matrix, probe, evidence, manifests, guards)
 └── docs/
     ├── PRODUCT-BRIEF.md
     ├── ARCHITECTURE.md
@@ -124,6 +145,7 @@ trafficfuse-ai/
     ├── PHASE0.1-REVIEW-FIXES.md
     ├── PHASE1A-DESIGN.md
     ├── PHASE1A-REPORT.md
+    ├── PHASE1A1-HARDENING-REPORT.md
     └── PHASE1-PREFLIGHT.md
 ```
 
@@ -138,6 +160,8 @@ trafficfuse-ai/
 - [docs/PHASE1-PREFLIGHT.md](docs/PHASE1-PREFLIGHT.md) — read-only environment findings, cluster design
 - [docs/PHASE1A-DESIGN.md](docs/PHASE1A-DESIGN.md) — failure-lab design and topology
 - [docs/PHASE1A-REPORT.md](docs/PHASE1A-REPORT.md) — Phase 1A implementation evidence
+- [docs/PHASE1A1-HARDENING-REPORT.md](docs/PHASE1A1-HARDENING-REPORT.md) — Phase 1A.1 review-fix
+  evidence: image, evidence export, ownership guards, fault-rate matrix, Phase 1B workflow
 
 ## License
 

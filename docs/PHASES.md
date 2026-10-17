@@ -26,8 +26,20 @@ receipt), standardized identity (`trafficfuse-lab` / `kind-trafficfuse-lab` /
 `trafficfuse-system`); 83 offline tests green; no cluster created or touched.
 See docs/PHASE1A-DESIGN.md and docs/PHASE1A-REPORT.md.
 
+**Phase 1A.1 (deployment readiness hardening): PASS** — resolves the four review findings:
+reproducible lab image definition (`deploy/lab/Dockerfile`, `.dockerignore`, pinned
+requirements, `imagePullPolicy: Never`; offline build reported BUILD_NOT_VERIFIED as permitted),
+durable probe-evidence export (stdout markers, strict validation, `evidence_cli`,
+`artifacts/phase1b/<run-id>/` collection with raw-log preservation), strengthened ownership
+guards (path normalization/symlink/traversal resistance, kubeconfig document verification with
+CA-fingerprint anchor, v2 creation record, live-facts ownership verification, mandatory
+negative tests), and an exact deterministic fault-rate algorithm (Bresenham distribution with
+probe-supplied request indices). 240 offline tests green; AGENTS.md and the pinned runtime
+untouched; no cluster operations. See docs/PHASE1A1-HARDENING-REPORT.md.
+
 **Phase 1B (real cluster execution): PARTIAL — requires explicit authorization.** Remaining:
-cluster creation, image build/load, and running the probe scenarios against the live Services.
+cluster creation, real image build/load (offline build impossible without staged wheels), and
+running the probe scenarios against the live Services.
 
 Goal: a real isolated **Kind** environment with a healthy and a faulty service version and
 reproducible HTTP 500 failure evidence; evidence collection service.

@@ -39,6 +39,10 @@ dist-ssr/
 kubeconfig*
 *.kubeconfig
 
+# Phase 1B probe-evidence exports (artifacts/phase1b/<run-id>/): local,
+# git-ignored, never committed (raw logs and parsed evidence documents).
+artifacts/
+
 # Agent workspace data (local assistant memory/logs — not project source)
 .workbuddy-ai/
 

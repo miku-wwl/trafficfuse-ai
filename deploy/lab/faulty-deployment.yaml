@@ -31,7 +31,7 @@ spec:
       containers:
         - name: lab-service
           image: trafficfuse-lab-service:phase1a
-          imagePullPolicy: IfNotPresent
+          imagePullPolicy: Never
           command: ["python", "-m", "trafficfuse.lab.service"]
           env:
             - name: TRAFFICFUSE_LAB_MODE

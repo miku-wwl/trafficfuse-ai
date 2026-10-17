@@ -4,11 +4,13 @@ Every assertion is derived from the YAML documents themselves; no kubectl,
 kind, or cluster API call is performed (Phase 1A brief, section 9).
 """
 
+import tomllib
 from pathlib import Path
 
 import yaml
 
 LAB_DIR = Path(__file__).resolve().parents[1] / "deploy" / "lab"
+PROJECT_ROOT = LAB_DIR.parents[1]
 
 BASELINE_FILES = [
     "namespace.yaml",
@@ -161,6 +163,99 @@ def test_probe_job_is_scoped_and_isolated() -> None:
     assert args[output_index] == "/evidence/probe-live.json"
     mounts = {mount["name"] for mount in container["volumeMounts"]}
     assert mounts == {"evidence"}
+
+
+# --- reproducible image definition (Phase 1A.1, finding P1) ---------------------
+
+DOCKERFILE = LAB_DIR / "Dockerfile"
+REQUIREMENTS = LAB_DIR / "requirements-lab.txt"
+DOCKERIGNORE = PROJECT_ROOT / ".dockerignore"
+
+
+def test_dockerfile_and_dockerignore_exist() -> None:
+    assert DOCKERFILE.is_file()
+    assert DOCKERIGNORE.is_file()
+    assert REQUIREMENTS.is_file()
+
+
+def test_dockerfile_pins_base_image_by_digest() -> None:
+    text = DOCKERFILE.read_text(encoding="utf-8")
+    assert "ARG PYTHON_IMAGE=" in text
+    assert "FROM ${PYTHON_IMAGE}" in text
+    # No moving tags: the default base reference is digest-pinned.
+    assert "python@sha256:" in text
+
+
+def test_dockerfile_runs_non_root_on_8080() -> None:
+    text = DOCKERFILE.read_text(encoding="utf-8")
+    assert "useradd" in text
+    assert "USER trafficfuse" in text
+    assert "EXPOSE 8080" in text
+    # Single shared image: both startup commands are documented/executable.
+    assert "python -m trafficfuse.lab.service" in text
+    assert "python -m trafficfuse.lab.probe_cli" in text
+
+
+def test_dockerfile_embeds_no_credentials_or_shared_runtime() -> None:
+    # Comments may explain *why* something is excluded; only executed content
+    # is scanned. (Inline trailing comments are not valid Dockerfile syntax.)
+    code = "\n".join(
+        line
+        for line in DOCKERFILE.read_text(encoding="utf-8").splitlines()
+        if not line.strip().startswith("#")
+    ).lower()
+    for forbidden in (
+        "git+https://",
+        "password",
+        "secret",
+        "api_key",
+        "token",
+        "agentic-intent-gate",
+        "agentic_intent_gate",
+    ):
+        assert forbidden not in code, forbidden
+
+
+def test_image_requirements_match_uv_lock_exactly() -> None:
+    # The image pins must mirror the authoritative lockfile (uv.lock), and the
+    # shared runtime must not leak into the lightweight lab image.
+    pins: dict[str, str] = {}
+    for line in REQUIREMENTS.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        name, _, version = line.partition("==")
+        assert version, f"unpinned requirement: {line}"
+        pins[name.lower()] = version
+    lock = tomllib.loads((PROJECT_ROOT / "uv.lock").read_text(encoding="utf-8"))
+    locked = {
+        package["name"].lower(): package["version"] for package in lock["package"]
+    }
+    assert pins, "no pinned requirements found"
+    for name, version in pins.items():
+        assert locked.get(name) == version, f"{name}: image {version} != lock {locked.get(name)}"
+    assert "agentic-intent-gate" not in pins
+
+
+def test_lab_package_does_not_import_shared_runtime() -> None:
+    # Proof the lightweight image needs no Agentic Intent Gate installation:
+    # no lab module imports it.
+    for source in (PROJECT_ROOT / "src" / "trafficfuse" / "lab").glob("*.py"):
+        assert "agentic_intent_gate" not in source.read_text(encoding="utf-8"), source.name
+
+
+def test_manifests_use_never_pull_policy_for_kind_loaded_image() -> None:
+    # The image is loaded into the kind node; it must never be pulled.
+    for name in ("healthy-deployment.yaml", "faulty-deployment.yaml", "probe-job.yaml"):
+        for container in _containers(_load(name)[0]):
+            assert container["image"] == EXPECTED_IMAGE_TAG
+            assert container["imagePullPolicy"] == "Never", name
+
+
+def test_dockerignore_excludes_local_state() -> None:
+    entries = DOCKERIGNORE.read_text(encoding="utf-8").splitlines()
+    for required in (".git", ".venv", ".runtime", "tests", ".workbuddy-ai", ".env"):
+        assert required in entries, required
 
 
 def test_kustomization_excludes_probe_job() -> None:
