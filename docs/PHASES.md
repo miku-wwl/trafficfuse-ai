@@ -37,9 +37,23 @@ negative tests), and an exact deterministic fault-rate algorithm (Bresenham dist
 probe-supplied request indices). 240 offline tests green; AGENTS.md and the pinned runtime
 untouched; no cluster operations. See docs/PHASE1A1-HARDENING-REPORT.md.
 
+**Phase 1A.2 (final preflight corrections): PASS** — resolves the five review findings:
+exact repository-owned kubeconfig path enforcement (the path is derived from the module's own
+repository root; a foreign repository with an identical layout is refused), corrected Phase 1B
+runbook ordering (documentation only: image load **after** cluster creation, context
+`kind-trafficfuse-lab` vs namespace `trafficfuse-system`, caller-facts replaced by the trusted
+collector), a trusted read-only live-facts collector (allowlisted, explicitly scoped,
+fail-closed; caller-supplied facts never sole proof of ownership), strict timezone-aware UTC
+evidence timestamps (naive/malformed/reversed refused via a controlled error type), and
+byte-for-byte raw-log preservation (bounded, atomic writes, audit metadata, raw preserved on
+parse failure). 295 offline tests green, 1 skipped; AGENTS.md and the pinned runtime
+untouched; no cluster operations. See docs/PHASE1A2-FINAL-PREFLIGHT-REPORT.md and
+docs/PHASE1B-RUNBOOK.md.
+
 **Phase 1B (real cluster execution): PARTIAL — requires explicit authorization.** Remaining:
 cluster creation, real image build/load (offline build impossible without staged wheels), and
-running the probe scenarios against the live Services.
+running the probe scenarios against the live Services. The corrected operator sequence is
+specified in docs/PHASE1B-RUNBOOK.md (documentation only).
 
 Goal: a real isolated **Kind** environment with a healthy and a faulty service version and
 reproducible HTTP 500 failure evidence; evidence collection service.

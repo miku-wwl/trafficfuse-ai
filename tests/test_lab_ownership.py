@@ -22,6 +22,7 @@ from trafficfuse.lab.lifecycle import (
     ClusterFacts,
     SafetyViolation,
     ca_fingerprint_sha256,
+    canonical_kubeconfig_path,
     is_dedicated_kubeconfig,
     kubectl_prefix,
     load_kubeconfig_document,
@@ -42,6 +43,17 @@ OWNED_LABELS = {
     "trafficfuse.io/owner": CLUSTER_NAME,
     "app.kubernetes.io/managed-by": CLUSTER_NAME,
 }
+
+
+@pytest.fixture
+def repo_root(tmp_path, monkeypatch):
+    """Point the trusted repository root at a synthetic repository layout.
+
+    Production always derives the root from the installed module location;
+    tests must never write into the real repository's .runtime directory.
+    """
+    monkeypatch.setattr(lifecycle, "PROJECT_ROOT", tmp_path)
+    return tmp_path
 
 
 def _ca_data() -> str:
@@ -114,12 +126,13 @@ def _facts(**overrides) -> ClusterFacts:
 # --- kubeconfig path refusals -------------------------------------------------------
 
 
-def test_missing_dedicated_kubeconfig_refused(tmp_path: Path) -> None:
-    missing = tmp_path / ".runtime" / "kubeconfig" / "trafficfuse-lab.yaml"
-    # Path shape validates, but the document does not exist: refuse.
-    assert validate_kubeconfig_path(missing).name == "trafficfuse-lab.yaml"
+def test_missing_dedicated_kubeconfig_refused() -> None:
+    # The canonical repository-owned path is the only accepted shape. No
+    # cluster exists yet, so the file is absent: loading must refuse.
+    canonical = canonical_kubeconfig_path()
+    assert validate_kubeconfig_path(DEDICATED_KUBECONFIG) == canonical
     with pytest.raises(SafetyViolation, match="does not exist"):
-        load_kubeconfig_document(missing)
+        load_kubeconfig_document(DEDICATED_KUBECONFIG)
 
 
 def test_unexpected_kubeconfig_path_refused(tmp_path: Path) -> None:
@@ -151,6 +164,73 @@ def test_path_traversal_escape_refused(tmp_path: Path) -> None:
     escaped = tmp_path / ".runtime" / "kubeconfig" / ".." / ".." / "outside" / "trafficfuse-lab.yaml"
     with pytest.raises(SafetyViolation, match="escaped the dedicated"):
         validate_kubeconfig_path(escaped)
+
+
+def test_foreign_repository_with_identical_layout_refused(tmp_path: Path) -> None:
+    # Phase 1A.2 review reproduction: a path such as
+    # /tmp/not_this_project/.runtime/kubeconfig/trafficfuse-lab.yaml matches
+    # the expected directory *shape* but belongs to no TrafficFuse
+    # repository. Shape is not ownership; only the exact canonical path is.
+    foreign = tmp_path / "not_this_project" / ".runtime" / "kubeconfig" / "trafficfuse-lab.yaml"
+    foreign.parent.mkdir(parents=True)
+    foreign.write_text("apiVersion: v1\nkind: Config\n", encoding="utf-8")
+    with pytest.raises(SafetyViolation, match="repository-owned"):
+        validate_kubeconfig_path(foreign)
+    assert is_dedicated_kubeconfig(foreign) is False
+
+
+def test_mocked_symlink_escape_via_path_resolution(tmp_path: Path, monkeypatch) -> None:
+    # Real symlink creation requires elevated privileges on this Windows
+    # workstation (the native test above is skipped here), so this test MOCKS
+    # the path-resolution step only: the candidate has the canonical shape,
+    # but resolution lands outside the .runtime/kubeconfig directory. It
+    # exercises the same rejection logic; native symlink behavior is NOT
+    # claimed.
+    candidate = tmp_path / ".runtime" / "kubeconfig" / "trafficfuse-lab.yaml"
+    escaped_to = tmp_path / "outside" / "trafficfuse-lab.yaml"
+    real_resolve = Path.resolve
+
+    def fake_resolve(self, *args, **kwargs):
+        if self == candidate:
+            return escaped_to
+        return real_resolve(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", fake_resolve)
+    with pytest.raises(SafetyViolation, match="escaped the dedicated"):
+        validate_kubeconfig_path(candidate)
+
+
+def test_mocked_symlink_escape_to_foreign_repository(tmp_path: Path, monkeypatch) -> None:
+    # Mocked resolution landing in a foreign repository with the identical
+    # directory shape: refused by the exact canonical-path equality check.
+    foreign = tmp_path / "not_this_project" / ".runtime" / "kubeconfig" / "trafficfuse-lab.yaml"
+    foreign.parent.mkdir(parents=True)
+    candidate = tmp_path / ".runtime" / "kubeconfig" / "trafficfuse-lab.yaml"
+    real_resolve = Path.resolve
+
+    def fake_resolve(self, *args, **kwargs):
+        if self == candidate:
+            return foreign
+        return real_resolve(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", fake_resolve)
+    with pytest.raises(SafetyViolation, match="repository-owned"):
+        validate_kubeconfig_path(candidate)
+
+
+def test_cli_and_preflight_entry_points_enforce_canonical_path(tmp_path: Path, capsys) -> None:
+    # CLI entry points and the preflight planning entry point must apply the
+    # exact same validation (single implementation, no duplicates).
+    from trafficfuse.lab.lifecycle import build_preflight_plan
+    from trafficfuse.lab.lifecycle_cli import main as lifecycle_cli_main
+
+    foreign = tmp_path / "not_this_project" / ".runtime" / "kubeconfig" / "trafficfuse-lab.yaml"
+    with pytest.raises(SafetyViolation, match="repository-owned"):
+        build_preflight_plan(kubeconfig_path=foreign)
+    assert (
+        lifecycle_cli_main(["preflight", "--kubeconfig", str(foreign)]) == 2
+    )
+    assert "REFUSED" in capsys.readouterr().err
 
 
 def test_global_kubeconfig_fallback_refused() -> None:
@@ -219,9 +299,9 @@ def test_ca_fingerprint_helper() -> None:
         ca_fingerprint_sha256("!!!not-base64!!!")
 
 
-def test_valid_kubeconfig_document_verifies(tmp_path: Path) -> None:
+def test_valid_kubeconfig_document_verifies(repo_root: Path) -> None:
     path = _write_kubeconfig(
-        tmp_path / ".runtime" / "kubeconfig" / "trafficfuse-lab.yaml", _kubeconfig_document()
+        repo_root / ".runtime" / "kubeconfig" / "trafficfuse-lab.yaml", _kubeconfig_document()
     )
     identity = verify_kubeconfig_document(load_kubeconfig_document(path))
     assert identity.context == EXPECTED_CONTEXT
@@ -318,27 +398,28 @@ def test_foreign_or_unowned_cluster_names_refused(name: str) -> None:
 
 def test_destroy_without_verified_ownership_refused(tmp_path: Path) -> None:
     record = _write_record(tmp_path / "record.json")
-    # Mismatched API server in the live facts.
+    # Mismatched API server in collector-sourced (trusted transport) facts:
+    # the verification gate must refuse, not the caller-facts gate.
     with pytest.raises(SafetyViolation, match="ownership could not be verified"):
         plan_cluster_destroy(
             kubeconfig_path=DEDICATED_KUBECONFIG,
             receipt_path=record,
             authorized=True,
-            cluster_facts=_facts(api_server="https://127.0.0.1:7777"),
+            cluster_facts=_facts(api_server="https://127.0.0.1:7777", source="collector"),
         )
 
 
 # --- full pipeline ------------------------------------------------------------------------
 
 
-def test_full_ownership_pipeline_succeeds_with_consistent_fixtures(tmp_path: Path) -> None:
+def test_full_ownership_pipeline_succeeds_with_consistent_fixtures(repo_root: Path) -> None:
     document = _kubeconfig_document()
     ca_fp = hashlib.sha256(b"synthetic-ca-certificate").hexdigest()
     kubeconfig = _write_kubeconfig(
-        tmp_path / ".runtime" / "kubeconfig" / "trafficfuse-lab.yaml", document
+        repo_root / ".runtime" / "kubeconfig" / "trafficfuse-lab.yaml", document
     )
     record = _write_record(
-        tmp_path / "record.json", ca_fingerprint_sha256=ca_fp
+        repo_root / "record.json", ca_fingerprint_sha256=ca_fp
     )
     identity, verification = verify_cluster_ownership(
         kubeconfig_path=kubeconfig,
@@ -350,12 +431,12 @@ def test_full_ownership_pipeline_succeeds_with_consistent_fixtures(tmp_path: Pat
     assert verification.failures == ()
 
 
-def test_full_ownership_pipeline_refuses_conflicting_record(tmp_path: Path) -> None:
+def test_full_ownership_pipeline_refuses_conflicting_record(repo_root: Path) -> None:
     kubeconfig = _write_kubeconfig(
-        tmp_path / ".runtime" / "kubeconfig" / "trafficfuse-lab.yaml", _kubeconfig_document()
+        repo_root / ".runtime" / "kubeconfig" / "trafficfuse-lab.yaml", _kubeconfig_document()
     )
     record = _write_record(
-        tmp_path / "record.json",
+        repo_root / "record.json",
         ca_fingerprint_sha256=hashlib.sha256(b"different-ca").hexdigest(),
     )
     with pytest.raises(SafetyViolation, match="does not match the creation record"):

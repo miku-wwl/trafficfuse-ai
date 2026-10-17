@@ -8,9 +8,13 @@ and stored under ``artifacts/phase1b/<run-id>/``::
         --context kind-trafficfuse-lab -n trafficfuse-system logs job/trafficfuse-probe \\
         | python -m trafficfuse.lab.evidence_cli --logs - --run-id phase1b-live-001
 
-Structural problems (missing/truncated/ambiguous/duplicated documents) exit 3;
-strict validation failures exit 4; the export summary is printed to stdout as
-JSON on success.
+The capture is read as **raw bytes** and preserved byte-for-byte before any
+parsing; even a failed collection leaves the raw logs and an audit file under
+the run directory (the stderr message says where).
+
+Exit codes: 0 success; 1 unreadable input; 3 structural format problem
+(missing/truncated/ambiguous/duplicated evidence, non-UTF-8 or oversized
+capture); 4 strict content validation failure.
 """
 
 from __future__ import annotations
@@ -18,15 +22,26 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from pathlib import Path
 
 from trafficfuse.lab.evidence import EvidenceFormatError
 from trafficfuse.lab.evidence_export import (
+    RAW_LOGS_FILENAME,
     EvidenceValidationError,
-    collect_evidence_from_logs,
+    RawLogDecodingError,
+    RawLogSizeError,
+    collect_evidence_from_log_bytes,
 )
 
 EXIT_FORMAT_ERROR = 3
 EXIT_VALIDATION_ERROR = 4
+
+
+def _failure_hint(artifacts_root: str, run_id: str) -> str:
+    preserved = Path(artifacts_root) / run_id / RAW_LOGS_FILENAME
+    if preserved.exists():
+        return f" (raw logs preserved byte-for-byte at {preserved})"
+    return ""
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -45,28 +60,29 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if args.logs == "-":
-        raw_logs = sys.stdin.read()
+        raw_logs = sys.stdin.buffer.read()
         run_id = args.run_id or "stdin-run"
     else:
-        from pathlib import Path
-
         path = Path(args.logs)
         try:
-            raw_logs = path.read_text(encoding="utf-8", errors="replace")
+            raw_logs = path.read_bytes()
         except OSError as exc:
             sys.stderr.write(f"cannot read logs file {path}: {exc}\n")
             return 1
         run_id = args.run_id or path.stem or "run"
 
     try:
-        result = collect_evidence_from_logs(
+        result = collect_evidence_from_log_bytes(
             raw_logs, run_id=run_id, artifacts_root=args.artifacts_root
         )
     except EvidenceFormatError as exc:
-        sys.stderr.write(f"EVIDENCE FORMAT ERROR: {exc}\n")
+        sys.stderr.write(f"EVIDENCE FORMAT ERROR: {exc}{_failure_hint(args.artifacts_root, run_id)}\n")
+        return EXIT_FORMAT_ERROR
+    except (RawLogDecodingError, RawLogSizeError) as exc:
+        sys.stderr.write(f"EVIDENCE FORMAT ERROR: {exc}{_failure_hint(args.artifacts_root, run_id)}\n")
         return EXIT_FORMAT_ERROR
     except EvidenceValidationError as exc:
-        sys.stderr.write(f"EVIDENCE VALIDATION ERROR: {exc}\n")
+        sys.stderr.write(f"EVIDENCE VALIDATION ERROR: {exc}{_failure_hint(args.artifacts_root, run_id)}\n")
         return EXIT_VALIDATION_ERROR
     except (ValueError, FileExistsError) as exc:
         sys.stderr.write(f"EXPORT FAILED: {exc}\n")

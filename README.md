@@ -28,6 +28,18 @@
 > negative tests), and an **exact** deterministic fault-rate algorithm (configured P% → exactly
 > P failures per 100 requests). 240 offline tests green; `AGENTS.md` and the pinned runtime
 > untouched. See [docs/PHASE1A1-HARDENING-REPORT.md](docs/PHASE1A1-HARDENING-REPORT.md).
+>
+> **Phase 1A.2 — final preflight corrections: PASS.** Exact repository-owned kubeconfig path
+> enforcement (a foreign repository with an identical layout is refused), a **trusted
+> read-only live-facts collector** whose commands are allowlisted, explicitly scoped and
+> fail-closed — caller-supplied facts are never sole proof of ownership, strict
+> timezone-aware (UTC) evidence timestamps, and byte-for-byte raw-log preservation (bounded,
+> atomic writes, audit metadata, raw logs preserved on parse failure). The Phase 1B operator
+> runbook ordering is corrected (the image loads **after** cluster creation; the context is
+> `kind-trafficfuse-lab`, never the namespace). 295 offline tests green, 1 skipped;
+> `AGENTS.md` and the pinned runtime untouched. See
+> [docs/PHASE1A2-FINAL-PREFLIGHT-REPORT.md](docs/PHASE1A2-FINAL-PREFLIGHT-REPORT.md) and
+> [docs/PHASE1B-RUNBOOK.md](docs/PHASE1B-RUNBOOK.md).
 
 ## What TrafficFuse AI is
 
@@ -103,7 +115,9 @@ uv run python -m trafficfuse.lab.lifecycle_cli preflight \
     --kubeconfig .runtime/kubeconfig/trafficfuse-lab.yaml                  # non-mutating Phase 1B plan
 uv run python -m trafficfuse.lab.lifecycle_cli verify \
     --kubeconfig .runtime/kubeconfig/trafficfuse-lab.yaml \
-    --receipt .runtime/state/cluster-trafficfuse-lab.json --facts facts.json  # offline ownership check
+    --receipt .runtime/state/cluster-trafficfuse-lab.json --collect  # trusted read-only ownership check
+# --facts <file> is an untrusted, inspection-only alternative: never sufficient
+# proof for a destructive operation.
 ```
 
 The lab image is defined by `deploy/lab/Dockerfile` (build context: repository root):
@@ -113,9 +127,12 @@ docker build --pull -f deploy/lab/Dockerfile -t trafficfuse-lab-service:phase1a 
 ```
 
 Cluster execution (`trafficfuse-lab`), image build/load, and the future
-`reroute_service_traffic` tool are **not** executed in Phase 1A/1A.1 and require explicit
-authorization (docs/PHASE1-PREFLIGHT.md, docs/PHASE1A-REPORT.md,
-docs/PHASE1A1-HARDENING-REPORT.md).
+`reroute_service_traffic` tool are **not** executed in Phase 1A/1A.1/1A.2 and require
+explicit authorization (docs/PHASE1-PREFLIGHT.md, docs/PHASE1A-REPORT.md,
+docs/PHASE1A1-HARDENING-REPORT.md). The corrected operator sequence for Phase 1B
+(cluster creation → image load → record + trusted verification → workloads → probe →
+byte-preserving evidence export → preserved environment) is specified in
+[docs/PHASE1B-RUNBOOK.md](docs/PHASE1B-RUNBOOK.md).
 
 ## Repository layout
 
@@ -146,6 +163,8 @@ trafficfuse-ai/
     ├── PHASE1A-DESIGN.md
     ├── PHASE1A-REPORT.md
     ├── PHASE1A1-HARDENING-REPORT.md
+    ├── PHASE1A2-FINAL-PREFLIGHT-REPORT.md
+    ├── PHASE1B-RUNBOOK.md
     └── PHASE1-PREFLIGHT.md
 ```
 
@@ -162,6 +181,11 @@ trafficfuse-ai/
 - [docs/PHASE1A-REPORT.md](docs/PHASE1A-REPORT.md) — Phase 1A implementation evidence
 - [docs/PHASE1A1-HARDENING-REPORT.md](docs/PHASE1A1-HARDENING-REPORT.md) — Phase 1A.1 review-fix
   evidence: image, evidence export, ownership guards, fault-rate matrix, Phase 1B workflow
+- [docs/PHASE1A2-FINAL-PREFLIGHT-REPORT.md](docs/PHASE1A2-FINAL-PREFLIGHT-REPORT.md) — Phase 1A.2
+  final preflight corrections: exact kubeconfig ownership, trusted live-facts collector,
+  strict UTC timestamps, byte-preserving raw logs
+- [docs/PHASE1B-RUNBOOK.md](docs/PHASE1B-RUNBOOK.md) — corrected Phase 1B operator runbook
+  (documentation only; every mutating step requires explicit approval)
 
 ## License
 

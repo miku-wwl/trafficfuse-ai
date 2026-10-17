@@ -8,7 +8,9 @@ owns:
   document (progress logs go to stderr, never into the document);
 * strict validation of a complete evidence document (schema, identity, counts,
   HTTP status classifications, latency, observed error rate, synthetic
-  workload declaration, real observation timestamps);
+  workload declaration, and strict timezone-aware observation timestamps
+  normalized to UTC — a naive or malformed timestamp is refused, and
+  ``completed_at_utc`` may never precede ``started_at_utc``);
 * extraction of the single evidence document from raw logs, rejecting
   missing, truncated, malformed or duplicated documents.
 
@@ -21,7 +23,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from trafficfuse.lab.probe import (
@@ -52,6 +54,51 @@ class EvidenceFormatError(Exception):
     """Raised when logs do not contain exactly one complete evidence document."""
 
 
+class TimestampValidationError(ValueError):
+    """Raised when a timestamp is not a strict timezone-aware ISO-8601 value.
+
+    Controlled error type: subclasses ``ValueError`` so existing callers keep
+    working, but lets callers distinguish timestamp defects from unrelated
+    ``ValueError``/``TypeError`` raised by stdlib datetime parsing.
+    """
+
+
+def parse_utc_timestamp(value: Any, field_name: str = "timestamp") -> datetime:
+    """Strictly parse an ISO-8601 timestamp and normalize it to UTC.
+
+    Rules (Phase 1A.2 review finding P2):
+
+    * the value must be a string;
+    * it must parse as ISO-8601;
+    * it must carry an explicit UTC offset — a naive timestamp (no offset)
+      is refused, because an unlabeled local time cannot be evidence;
+    * an explicit UTC designator (``Z``/``z`` or ``+00:00``) is accepted, and
+      any other explicit offset is accepted and normalized to UTC;
+    * malformed values raise :class:`TimestampValidationError` with the field
+      name, never a bare stdlib exception.
+    """
+    if not isinstance(value, str):
+        raise TimestampValidationError(
+            f"{field_name} must be an ISO-8601 string, got {value!r}"
+        )
+    text = value.strip()
+    if not text:
+        raise TimestampValidationError(f"{field_name} must not be empty")
+    candidate = text[:-1] + "+00:00" if text.endswith(("Z", "z")) else text
+    try:
+        parsed = datetime.fromisoformat(candidate)
+    except ValueError as exc:
+        raise TimestampValidationError(
+            f"{field_name} is not a valid ISO-8601 timestamp: {value!r}"
+        ) from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise TimestampValidationError(
+            f"{field_name} must be timezone-aware (explicit 'Z' or '+00:00' offset), "
+            f"got {value!r}"
+        )
+    return parsed.astimezone(timezone.utc)
+
+
 @dataclass(frozen=True)
 class EvidenceValidationResult:
     """Strict validation outcome: never raises, always reports every problem."""
@@ -72,14 +119,13 @@ def _require_str(document: dict[str, Any], key: str, errors: list[str], *, non_e
         errors.append(f"{key} must be a non-empty string, got {value!r}")
 
 
-def _require_iso_timestamp(value: Any, key: str, errors: list[str]) -> None:
-    if not isinstance(value, str):
-        errors.append(f"{key} must be an ISO-8601 string, got {value!r}")
-        return
+def _require_iso_timestamp(value: Any, key: str, errors: list[str]) -> datetime | None:
+    """Validate one timestamp strictly; return the normalized UTC value or None."""
     try:
-        datetime.fromisoformat(value)
-    except ValueError:
-        errors.append(f"{key} is not a valid ISO-8601 timestamp: {value!r}")
+        return parse_utc_timestamp(value, key)
+    except TimestampValidationError as exc:
+        errors.append(str(exc))
+        return None
 
 
 def validate_evidence_document(document: Any) -> EvidenceValidationResult:
@@ -142,16 +188,13 @@ def validate_evidence_document(document: Any) -> EvidenceValidationResult:
                 f"{error}/{total} (expected {expected})"
             )
 
-    _require_iso_timestamp(document.get("started_at_utc"), "started_at_utc", errors)
-    _require_iso_timestamp(document.get("completed_at_utc"), "completed_at_utc", errors)
-    started = document.get("started_at_utc")
-    completed = document.get("completed_at_utc")
-    if isinstance(started, str) and isinstance(completed, str):
-        try:
-            if datetime.fromisoformat(completed) < datetime.fromisoformat(started):
-                errors.append("completed_at_utc must not precede started_at_utc")
-        except ValueError:
-            pass  # already reported by the per-field checks
+    # Strict timezone-aware timestamps, normalized to UTC before comparison:
+    # a naive value never reaches the ordering check (already reported above),
+    # and a completed_at earlier than started_at is refused.
+    started = _require_iso_timestamp(document.get("started_at_utc"), "started_at_utc", errors)
+    completed = _require_iso_timestamp(document.get("completed_at_utc"), "completed_at_utc", errors)
+    if started is not None and completed is not None and completed < started:
+        errors.append("completed_at_utc must not precede started_at_utc")
 
     latency = document.get("latency_ms")
     if not isinstance(latency, dict):

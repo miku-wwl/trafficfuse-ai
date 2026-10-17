@@ -151,6 +151,7 @@ def _verified_facts() -> ClusterFacts:
             "trafficfuse.io/owner": CLUSTER_NAME,
             "app.kubernetes.io/managed-by": CLUSTER_NAME,
         },
+        source="collector",
     )
 
 
@@ -187,6 +188,9 @@ def test_destroy_refuses_when_ownership_evidence_mismatches(tmp_path: Path) -> N
         ca_fingerprint_sha256=FIXTURE_CA_FINGERPRINT,
         node_names=FIXTURE_NODES,
         namespace_labels={},
+        # Collector-sourced (trusted transport) but mismatched content: the
+        # verification gate — not the caller-facts gate — must refuse it.
+        source="collector",
     )
     with pytest.raises(SafetyViolation, match="ownership could not be verified"):
         plan_cluster_destroy(

@@ -110,12 +110,29 @@ project; both are conditions for authorization, not environment gaps.
 
 ## 8. Phase 1B workflow (documentation only — not executed)
 
-After Phase 1A.1 hardening (docs/PHASE1A1-HARDENING-REPORT.md), Phase 1B requires
-the same explicit authorizations above **plus** a real image build (offline build
-was impossible: no staged wheels). The exact proposed sequence — image
-build/load, cluster creation with the dedicated kubeconfig, namespace and
-manifest application, creation-record write, ownership verification, probe
-scenarios, evidence export to `artifacts/phase1b/<run-id>/`, and name-pinned
-ownership-verified cleanup — is specified in the hardening report §7. Every
-kubectl invocation carries `--kubeconfig .runtime/kubeconfig/trafficfuse-lab.yaml
---context kind-trafficfuse-lab` explicitly; the ambient context is never used.
+After Phase 1A.1 hardening (docs/PHASE1A1-HARDENING-REPORT.md) and the Phase 1A.2
+final preflight corrections (docs/PHASE1A2-FINAL-PREFLIGHT-REPORT.md), Phase 1B
+requires the same explicit authorizations above **plus** a real image build
+(offline build was impossible: no staged wheels).
+
+The authoritative operator sequence is **docs/PHASE1B-RUNBOOK.md** (superseding
+the sketch previously in this section and in the hardening report §7, which had a
+step-ordering defect: the image was listed to load *before* cluster creation — a
+kind image can only load into the nodes of an existing cluster). The corrected
+order: repository/approval/precondition gates → kubeconfig prep → image build and
+static check → offline preflight → `kind create cluster` with the dedicated
+kubeconfig → **image load (after creation)** → creation record + trusted
+collector verification (`lifecycle_cli verify --collect`; caller JSON is
+untrusted) → `apply -k deploy/lab` → rollout wait → confirm `trafficfuse-live`
+selects `version=faulty` → probe Job → byte-preserving evidence export →
+measurements/report → environment preserved. Exact identities: cluster
+`trafficfuse-lab`, context `kind-trafficfuse-lab`, namespace `trafficfuse-system`,
+node `trafficfuse-lab-control-plane`, kubeconfig
+`.runtime/kubeconfig/trafficfuse-lab.yaml`.
+
+Every kubectl invocation carries `--kubeconfig .runtime/kubeconfig/trafficfuse-lab.yaml
+--context kind-trafficfuse-lab` explicitly (the namespace is passed as
+`-n trafficfuse-system`, never as a context); the ambient context — the foreign
+`kind-playground-crd` — is never read, switched or relied upon, and the foreign
+clusters `incident-lab`, `pcp-dev`, `playground-crd` and the non-disposable
+`vmware-k8s` are never valid targets.

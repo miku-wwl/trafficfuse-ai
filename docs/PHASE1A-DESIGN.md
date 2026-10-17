@@ -136,6 +136,20 @@ declaration, timestamps). Phase 1B collection: `kubectl … logs job/trafficfuse
 `python -m trafficfuse.lab.evidence_cli` → `artifacts/phase1b/<run-id>/` with raw logs
 preserved byte-for-byte (docs/PHASE1A1-HARDENING-REPORT.md §1).
 
+**Timestamp strictness (Phase 1A.2):** `started_at_utc` / `completed_at_utc` must be
+ISO-8601 **with an explicit UTC offset** — `Z`/`z` or `+00:00` (any other explicit offset is
+normalized to UTC). A naive timestamp (no offset), a malformed value or a non-string is
+refused via the controlled `TimestampValidationError` (a `ValueError` subclass), and
+`completed_at_utc` may never precede `started_at_utc` after normalization.
+
+**Byte preservation (Phase 1A.2):** collection accepts **raw bytes**
+(`collect_evidence_from_log_bytes`); the strict UTF-8 decode exists only as a private parse
+copy, so nothing is transcoded before it hits disk. The raw capture is written first
+(atomically, temp file + `os.replace`), is bounded by `MAX_RAW_LOG_BYTES`, and is preserved
+**even when extraction or validation fails**; each run directory carries `evidence-audit.json`
+(exact byte length, SHA-256, strict UTC timestamp, failure stage). Non-UTF-8 or oversized
+captures are refused before parsing.
+
 ## 6. Resource sizing (development workstation)
 
 | Resource | Requests | Limits |
@@ -150,20 +164,24 @@ inside the verified machine capacity (16 cores, 31.3 GB RAM; docs/PHASE1-PREFLIG
 
 - **Standardized identity:** cluster `trafficfuse-lab`, context
   `kind-trafficfuse-lab`, namespace `trafficfuse-system`. Any other value fails
-  closed (`Settings.validate`, lifecycle guards).
+  closed (`Settings.validate`, lifecycle guards). A namespace is never a context.
 - **Dedicated kubeconfig:** `.runtime/kubeconfig/trafficfuse-lab.yaml`
   (git-ignored). The global `~/.kube/config` and the ambient context are never
-  read or trusted; the path is normalized and resolved — symlink escapes and
-  traversal are refused; every kubectl invocation carries the dedicated
-  kubeconfig and exact context explicitly (`lifecycle.kubectl_prefix()`).
+  read or trusted. **Phase 1A.2:** the path is not merely shape-checked — it is
+  derived from the module's own repository root and must resolve to exactly that
+  canonical path, so a foreign repository with an identical directory layout is
+  refused (shape is not ownership). Symlink escapes and traversal are refused;
+  every kubectl invocation carries the dedicated kubeconfig and exact context
+  explicitly (`lifecycle.kubectl_prefix()`).
 - **Ownership metadata:** every manifest carries
   `trafficfuse.io/owner=trafficfuse-lab` and
   `app.kubernetes.io/managed-by=trafficfuse-lab`.
 - **Creation record (schema `trafficfuse-ownership-record-v2`):** Phase 1B
   tooling writes `.runtime/state/cluster-trafficfuse-lab.json` containing the
   cluster/context/namespace, the API server, the CA certificate SHA-256
-  fingerprint, the exact kind node names, creation timestamp, creator and
-  kubeconfig reference. The record is **metadata, not cryptographic proof**.
+  fingerprint, the exact kind node names, creation timestamp (strict
+  timezone-aware UTC), creator and kubeconfig reference. The record is
+  **metadata, not cryptographic proof**.
 - **Ownership verification (Phase 1A.1):** destruction requires a complete
   creation record *and* live ownership evidence that matches it exactly — API
   server, CA fingerprint, node identities and ownership labels — plus explicit
@@ -171,6 +189,14 @@ inside the verified machine capacity (16 cores, 31.3 GB RAM; docs/PHASE1-PREFLIG
   context→cluster binding, local HTTPS API server only, CA fingerprint anchor,
   no foreign contexts, no embedded static credentials). A matching cluster
   *name* alone is never deletion authority.
+- **Trusted live-facts collection (Phase 1A.2):** the only facts that can
+  authorize a destructive operation are **collector-sourced**
+  (`trafficfuse.lab.cluster_facts`): allowlisted, read-only commands (`config
+  view`, `get nodes`, `get namespace`, `docker inspect`), each carrying the
+  dedicated kubeconfig and exact context, each verified read-only *before*
+  execution, failing closed on any deviation. Caller-supplied JSON facts are
+  checked when explicitly requested (`lifecycle_cli verify --facts`) but are
+  marked **untrusted** and never sufficient proof for destruction.
 - **Known foreign clusters** (`incident-lab`, `pcp-dev`, `playground-crd`,
   `vmware-k8s`) are refused by name, as is any non-standard target.
 

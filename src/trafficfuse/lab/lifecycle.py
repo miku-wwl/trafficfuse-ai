@@ -9,7 +9,10 @@ approved (docs/PHASE1-PREFLIGHT.md).
 Isolation guarantees enforced offline:
 
 * a dedicated, git-ignored kubeconfig is required (never the global one); the
-  path is normalized, symlinks resolved and traversal refused;
+  path must resolve to the **exact canonical repository-owned path**
+  ``.runtime/kubeconfig/trafficfuse-lab.yaml`` under the trusted repository
+  root (derived from this module's location), with symlink escapes, traversal
+  and foreign repositories carrying an identical directory shape all refused;
 * the exact expected context (``kind-trafficfuse-lab``) is required — the
   ambient context is never read or trusted;
 * the kubeconfig *document* itself is verified: exact context and cluster
@@ -22,15 +25,20 @@ Isolation guarantees enforced offline:
 * destructive operations additionally require a complete TrafficFuse
   **creation record** (written by TrafficFuse tooling at creation time) and a
   successful ownership-evidence verification. The record is *metadata, not
-  cryptographic proof*: ownership is established by cross-checking live
-  cluster facts (API server, CA fingerprint, exact kind node identities,
+  cryptographic proof*: ownership is established by cross-checking **trusted
+  live facts** (API server, CA fingerprint, exact kind node identities,
   ownership labels) against the record. Any missing or mismatched evidence
   refuses the operation;
-* a matching cluster *name* alone is never treated as deletion authority.
+* a matching cluster *name* alone is never treated as deletion authority;
+* caller-supplied facts (a hand-written JSON file) can be *checked* but never
+  authorize destruction — only facts collected by the read-only collector
+  (``trafficfuse.lab.cluster_facts``) from the target environment, marked
+  ``source="collector"``, are trusted.
 
-Ownership evidence is verified against *caller-supplied facts* captured by
-read-only operator commands (see ``docs/PHASE1A1-HARDENING-REPORT.md`` for the
-exact Phase 1B protocol). This module never contacts a cluster.
+Ownership facts are verified against facts **collected from the target
+environment** through explicitly scoped read-only commands (see
+``trafficfuse.lab.cluster_facts`` and docs/PHASE1A2-FINAL-PREFLIGHT-REPORT.md
+for the exact Phase 1B protocol). This module never contacts a cluster.
 """
 
 from __future__ import annotations
@@ -87,6 +95,13 @@ EXPECTED_NODE_NAMES = (f"{CLUSTER_NAME}-control-plane",)
 # disposable kind cluster on this workstation. Remote hosts are refused.
 ALLOWED_API_HOSTS = ("127.0.0.1", "localhost", "::1")
 
+# Fact provenance. Only facts collected by the read-only collector
+# (trafficfuse.lab.cluster_facts) from the target environment count as
+# trusted ownership evidence; caller-supplied facts (a hand-written JSON
+# file) are never sufficient proof for destructive operations.
+COLLECTOR_SOURCE = "collector"
+CALLER_SOURCE = "caller"
+
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
 _DNS1123_LABEL = re.compile(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
@@ -139,13 +154,27 @@ def is_global_kubeconfig(path: Path | str) -> bool:
     return candidate.resolve() in (home_config.resolve(), etc_admin.resolve())
 
 
+def canonical_kubeconfig_path() -> Path:
+    """The one canonical TrafficFuse-owned kubeconfig path.
+
+    Derived from the installed module's own location (``__file__`` — a trusted
+    application location resolved by the interpreter), never from caller input.
+    A directory *shape* such as ``.runtime/kubeconfig/trafficfuse-lab.yaml`` is
+    not sufficient: any other repository or directory would produce exactly
+    that shape (Phase 1A.2 review finding P1).
+    """
+    return (PROJECT_ROOT / DEDICATED_KUBECONFIG).resolve()
+
+
 def validate_kubeconfig_path(path: Path | str) -> Path:
     """Validate and normalize the dedicated kubeconfig path.
 
     Refuses: the global kubeconfig, a wrong file name, any location outside a
-    ``.runtime/kubeconfig`` directory, and paths that escape that directory
+    ``.runtime/kubeconfig`` directory, paths that escape that directory
     through symlinks or traversal (the resolved parent must still be
-    ``.runtime/kubeconfig``). Returns the resolved absolute path.
+    ``.runtime/kubeconfig``), and — finally — any path that does not resolve to
+    the **exact canonical repository-owned path**
+    (``canonical_kubeconfig_path``). Returns the resolved absolute path.
     """
     candidate = Path(path)
     if is_global_kubeconfig(candidate):
@@ -173,6 +202,12 @@ def validate_kubeconfig_path(path: Path | str) -> Path:
             "resolved kubeconfig escaped the dedicated .runtime/kubeconfig directory "
             f"(resolved to {resolved}); refusing symlink or traversal substitution"
         )
+    canonical = canonical_kubeconfig_path()
+    if resolved != canonical:
+        raise SafetyViolation(
+            f"kubeconfig {resolved} is not the TrafficFuse repository-owned path "
+            f"{canonical}; refusing any path outside the verified repository root"
+        )
     return resolved
 
 
@@ -182,7 +217,7 @@ def is_dedicated_kubeconfig(path: Path | str) -> bool:
         resolved = validate_kubeconfig_path(path)
     except SafetyViolation:
         return False
-    return resolved == (PROJECT_ROOT / DEDICATED_KUBECONFIG).resolve()
+    return resolved == canonical_kubeconfig_path()
 
 
 def validate_ownership_labels(labels: Mapping[str, str]) -> None:
@@ -408,15 +443,19 @@ def load_ownership_receipt(path: Path | str) -> dict[str, Any]:
 class ClusterFacts:
     """Live cluster facts captured by read-only operator commands (Phase 1B).
 
-    This module never queries a cluster itself: the operator produces these
-    facts with explicit, context-pinned read-only commands and hands them to
-    the verification. Tests supply synthetic fixtures.
+    This module never queries a cluster itself: trusted facts are produced by
+    ``trafficfuse.lab.cluster_facts`` (the read-only collector, executed by an
+    operator with explicit, context-pinned commands) and marked
+    ``source="collector"``. Facts supplied by any other means (for example a
+    hand-written JSON file) carry ``source="caller"`` and are never sufficient
+    proof of ownership. Tests supply synthetic fixtures.
     """
 
     api_server: str
     ca_fingerprint_sha256: str
     node_names: tuple[str, ...]
     namespace_labels: Mapping[str, str] = field(default_factory=dict)
+    source: str = CALLER_SOURCE
 
 
 @dataclass(frozen=True)
@@ -424,6 +463,7 @@ class OwnershipVerification:
     """Per-check ownership verification outcome."""
 
     checks: tuple[tuple[str, bool, str], ...]
+    trusted: bool = False
 
     @property
     def verified(self) -> bool:
@@ -438,6 +478,7 @@ class OwnershipVerification:
     def to_dict(self) -> dict[str, Any]:
         return {
             "verified": self.verified,
+            "trusted": self.trusted,
             "checks": [
                 {"name": name, "passed": passed, "detail": detail}
                 for name, passed, detail in self.checks
@@ -452,7 +493,9 @@ def verify_ownership_evidence(
 
     Every trusted identity property must match exactly: API server, CA
     fingerprint, kind node identities and cluster ownership labels. Labels are
-    required but never sufficient on their own.
+    required but never sufficient on their own. ``trusted`` is True only when
+    the facts came from the read-only collector; caller-supplied facts can
+    still be *checked*, but they never authorize destruction.
     """
     checks: list[tuple[str, bool, str]] = []
 
@@ -501,7 +544,9 @@ def verify_ownership_evidence(
             f"{MANAGED_BY_LABEL_KEY}={CLUSTER_NAME!r}",
         )
     )
-    return OwnershipVerification(checks=tuple(checks))
+    return OwnershipVerification(
+        checks=tuple(checks), trusted=facts.source == COLLECTOR_SOURCE
+    )
 
 
 def require_verified_ownership(
@@ -651,9 +696,15 @@ def plan_cluster_destroy(
     validate_authorization("cluster destruction", authorized=authorized)
     if cluster_facts is None:
         raise SafetyViolation(
-            "cluster destruction requires verified ownership evidence: live "
-            "cluster facts cross-checked against the creation record. A matching "
-            "cluster name alone is never deletion authority"
+            "cluster destruction requires verified ownership evidence: collector-sourced "
+            "live facts cross-checked against the creation record. A matching cluster "
+            "name alone is never deletion authority"
+        )
+    if cluster_facts.source != COLLECTOR_SOURCE:
+        raise SafetyViolation(
+            "caller-supplied facts are never sole proof of ownership; destruction "
+            "requires collector-sourced live facts from "
+            "trafficfuse.lab.cluster_facts"
         )
     require_verified_ownership(record, cluster_facts)
     raise SafetyViolation(

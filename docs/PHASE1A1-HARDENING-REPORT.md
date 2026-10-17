@@ -261,6 +261,20 @@ Facts for step 4 are produced with read-only, context-pinned commands (e.g. `kub
 namespace trafficfuse-system -o json`, `kubectl … config view --raw`, `kubectl … get nodes`).
 The exact API-server host port, CA fingerprint and node names come from the created cluster.
 
+> **Correction (2026-10-18, Phase 1A.2):** the sketch above is **superseded** by
+> `docs/PHASE1B-RUNBOOK.md`. Three verified defects are corrected there: (1) the
+> `kind load docker-image` line was listed *before* `kind create cluster` — a kind
+> image loads into the nodes of an existing cluster, so the load must follow
+> creation (this was a documentation ordering defect; no cluster operation was
+> attempted in Phase 1A.1); (2) the log-collection line used
+> `--context kind-trafficfuse-system`, but `trafficfuse-system` is the namespace —
+> the context is `kind-trafficfuse-lab` and the namespace is passed as
+> `-n trafficfuse-system`; (3) ownership verification now uses the **trusted
+> read-only collector** (`lifecycle_cli verify --collect`), because caller-supplied
+> `--facts` JSON is untrusted and never sufficient proof for destructive
+> operations. The namespace is created by `apply -k deploy/lab` (it includes
+> `namespace.yaml`), removing the separate `create namespace` step.
+
 ## 8. Remaining limitations
 
 1. **BUILD_NOT_VERIFIED** image (offline constraint) — definition and static checks pass.

@@ -8,6 +8,9 @@ import hashlib
 import json
 from pathlib import Path
 
+import pytest
+
+from trafficfuse.lab import lifecycle
 from trafficfuse.lab.lifecycle import (
     CLUSTER_NAME,
     DEDICATED_KUBECONFIG,
@@ -23,7 +26,14 @@ FIXTURE_CA_FINGERPRINT = hashlib.sha256(FIXTURE_CA).hexdigest()
 FIXTURE_NODES = ["trafficfuse-lab-control-plane"]
 
 
-def _kubeconfig(tmp_path: Path) -> Path:
+@pytest.fixture
+def repo_root(tmp_path, monkeypatch):
+    """Point the trusted repository root at a synthetic repository layout."""
+    monkeypatch.setattr(lifecycle, "PROJECT_ROOT", tmp_path)
+    return tmp_path
+
+
+def _kubeconfig(repo_root: Path, tmp_path: Path) -> Path:
     import yaml
 
     document = {
@@ -49,7 +59,7 @@ def _kubeconfig(tmp_path: Path) -> Path:
             {"name": "kind-trafficfuse-lab", "user": {"client-certificate-data": "c", "client-key-data": "k"}}
         ],
     }
-    path = tmp_path / ".runtime" / "kubeconfig" / "trafficfuse-lab.yaml"
+    path = repo_root / ".runtime" / "kubeconfig" / "trafficfuse-lab.yaml"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(yaml.safe_dump(document), encoding="utf-8")
     return path
@@ -98,12 +108,12 @@ def _facts(tmp_path: Path, *, ca: str | None = None, labels: dict | None = None)
     return path
 
 
-def test_cli_verify_reports_verified_ownership(tmp_path: Path, capsys) -> None:
+def test_cli_verify_reports_verified_ownership(repo_root: Path, tmp_path: Path, capsys) -> None:
     exit_code = lifecycle_cli_main(
         [
             "verify",
             "--kubeconfig",
-            str(_kubeconfig(tmp_path)),
+            str(_kubeconfig(repo_root, tmp_path)),
             "--receipt",
             str(_record(tmp_path)),
             "--facts",
@@ -116,12 +126,12 @@ def test_cli_verify_reports_verified_ownership(tmp_path: Path, capsys) -> None:
     assert payload["identity"]["cluster"] == CLUSTER_NAME
 
 
-def test_cli_verify_refuses_unverified_ownership(tmp_path: Path, capsys) -> None:
+def test_cli_verify_refuses_unverified_ownership(repo_root: Path, tmp_path: Path, capsys) -> None:
     exit_code = lifecycle_cli_main(
         [
             "verify",
             "--kubeconfig",
-            str(_kubeconfig(tmp_path)),
+            str(_kubeconfig(repo_root, tmp_path)),
             "--receipt",
             str(_record(tmp_path)),
             "--facts",
@@ -133,10 +143,10 @@ def test_cli_verify_refuses_unverified_ownership(tmp_path: Path, capsys) -> None
     assert "REFUSED" in captured.err
 
 
-def test_cli_create_and_destroy_still_refuse(tmp_path: Path, capsys) -> None:
+def test_cli_create_and_destroy_still_refuse(repo_root: Path, tmp_path: Path, capsys) -> None:
     assert (
         lifecycle_cli_main(
-            ["create", "--kubeconfig", str(_kubeconfig(tmp_path)), "--authorized"]
+            ["create", "--kubeconfig", str(_kubeconfig(repo_root, tmp_path)), "--authorized"]
         )
         == 2
     )
@@ -145,7 +155,7 @@ def test_cli_create_and_destroy_still_refuse(tmp_path: Path, capsys) -> None:
             [
                 "destroy",
                 "--kubeconfig",
-                str(_kubeconfig(tmp_path)),
+                str(_kubeconfig(repo_root, tmp_path)),
                 "--receipt",
                 str(_record(tmp_path)),
                 "--authorized",
@@ -158,7 +168,7 @@ def test_cli_create_and_destroy_still_refuse(tmp_path: Path, capsys) -> None:
             [
                 "destroy",
                 "--kubeconfig",
-                str(_kubeconfig(tmp_path)),
+                str(_kubeconfig(repo_root, tmp_path)),
                 "--receipt",
                 str(_record(tmp_path)),
                 "--facts",
