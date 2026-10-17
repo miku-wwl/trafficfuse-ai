@@ -8,6 +8,10 @@
 > foundation are in place and verified. No AI diagnosis, Kubernetes execution, or dashboard
 > exists yet — see [docs/PHASES.md](docs/PHASES.md) for the roadmap and
 > [docs/PHASE0-REPORT.md](docs/PHASE0-REPORT.md) for verification evidence.
+>
+> **Phase 0.1 — review fixes applied:** MIT `LICENSE`, automatic local `.env` loading with
+> process-environment precedence, and portable dependency-origin tests. See
+> [docs/PHASE0.1-REVIEW-FIXES.md](docs/PHASE0.1-REVIEW-FIXES.md).
 
 ## What TrafficFuse AI is
 
@@ -63,7 +67,8 @@ Requires Python 3.13 and [`uv`](https://docs.astral.sh/uv/).
 ```bash
 git clone git@github.com:miku-wwl/trafficfuse-ai.git
 cd trafficfuse-ai
-cp .env.example .env        # local only; .env is gitignored and must never be committed
+cp .env.example .env        # optional; .env is git-ignored. It is loaded automatically,
+                           # and explicit process environment variables always win.
 uv sync                     # resolves uv.lock, installs the pinned runtime + dev tools
 uv run pytest               # offline smoke tests: pinned dependency, public API, health endpoint
 uv run uvicorn trafficfuse.api.app:app --reload
@@ -102,6 +107,13 @@ trafficfuse-ai/
 - [docs/COMPETITION.md](docs/COMPETITION.md) — verified official requirements, unknowns, disclosures
 - [docs/PHASES.md](docs/PHASES.md) — roadmap and acceptance gates
 - [docs/PHASE0-REPORT.md](docs/PHASE0-REPORT.md) — executed verification evidence
+
+## License
+
+TrafficFuse AI is released under the **MIT License** — see [LICENSE](LICENSE).
+External dependencies retain their own licenses; in particular the shared runtime
+**Agentic Intent Gate** (<https://github.com/miku-wwl/agentic-intent-gate>) is a
+separate MIT-licensed project consumed as a pinned external dependency.
 
 ## Scope boundaries
 

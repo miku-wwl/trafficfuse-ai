@@ -12,8 +12,14 @@ from __future__ import annotations
 
 import inspect
 import json
+import sys
 from importlib import metadata
 from pathlib import Path
+
+# src/trafficfuse/infrastructure/runtime.py -> parents: [0]=infrastructure,
+# [1]=trafficfuse, [2]=src, [3]=repository root.
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+PROJECT_SOURCE_ROOT = PROJECT_ROOT / "src"
 
 # --- Immutable pins (must stay in sync with pyproject.toml) -------------------
 
@@ -57,6 +63,42 @@ def module_path() -> Path:
     """Filesystem location the runtime is imported from (must be inside .venv)."""
     module = __import__(RUNTIME_DISTRIBUTION.replace("-", "_"))
     return Path(module.__file__).resolve()
+
+
+def imported_from_interpreter_prefix() -> bool:
+    """True when the runtime resolves inside the active interpreter environment.
+
+    Portable across venv / virtualenv / uv / poetry / conda / system installs
+    on Windows and Unix: the check uses ``sys.prefix``, never a hardcoded
+    directory name such as ``.venv``.
+    """
+    return module_path().is_relative_to(Path(sys.prefix).resolve())
+
+
+def imported_from_project_source_tree() -> bool:
+    """True when the runtime resolves inside this project's own source tree
+    (``src/``) — i.e. shared-runtime source was copied into this repository.
+
+    The check deliberately targets the source tree, not the repository
+    directory as a whole: a local virtualenv lives inside the repository but is
+    not copied source. Shadowing from an *adjacent* checkout outside the
+    project is caught by :func:`metadata_location_matches_import`.
+    """
+    return module_path().is_relative_to(PROJECT_SOURCE_ROOT)
+
+
+def metadata_location_matches_import() -> bool:
+    """Distribution metadata and the imported module agree on location.
+
+    Guards against ``sys.path`` shadowing, where the import succeeds from one
+    location (for example an adjacent shared-runtime checkout placed on
+    ``PYTHONPATH``) while installed distribution metadata reports another.
+    """
+    distribution = metadata.distribution(RUNTIME_DISTRIBUTION)
+    site_dir = Path(distribution.locate_file("")).resolve()
+    # module_path() is <site-packages>/agentic_intent_gate/__init__.py;
+    # parents[1] is the directory that contains the package (site-packages).
+    return module_path().parents[1] == site_dir
 
 
 def import_public_api() -> dict[str, object]:

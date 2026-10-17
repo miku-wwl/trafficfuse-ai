@@ -8,6 +8,10 @@ license = { text = "MIT" }
 dependencies = [
     # Backend foundation for the consumer application (Phase 0 brief, Step 3).
     "fastapi>=0.115",
+    # Loads an optional local, git-ignored .env at startup. The process
+    # environment always takes precedence (dotenv override=False); the file is
+    # never executed as code. See src/trafficfuse/config/settings.py.
+    "python-dotenv>=1.0",
     # Shared runtime, pinned to the immutable v0.2.0 release commit.
     # This is a Git release, not a PyPI publication; the exact commit SHA is
     # verified against the installed distribution by tests/test_runtime_dependency.py.
