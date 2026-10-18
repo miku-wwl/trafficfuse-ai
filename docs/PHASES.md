@@ -50,10 +50,22 @@ parse failure). 295 offline tests green, 1 skipped; AGENTS.md and the pinned run
 untouched; no cluster operations. See docs/PHASE1A2-FINAL-PREFLIGHT-REPORT.md and
 docs/PHASE1B-RUNBOOK.md.
 
+**Phase 1B entry review (safe deployment gate): PASS** — four findings corrected before any
+execution: (1) namespace bootstrap now precedes the namespace-dependent ownership-collector
+read (Stages C→D of the runbook; the old sequence was circular); (2) direct cluster deletion
+removed from the authorized Phase 1B workflow (preservation + separate cleanup authorization;
+regression-tested); (3) spoofed collector provenance eliminated — trust by execution: a private
+collector execution receipt minted only inside the collector, a destructive gate that performs
+the collection itself and accepts no caller facts, and the `source` string removed; (4)
+credential disclosure removed — kubeconfig identity via the trusted local parser (endpoint + CA
+fingerprint only), redacted outputs, no raw kubeconfig view command. 327 offline tests green,
+1 skipped; see docs/PHASE1B-ENTRY-REVIEW.md.
+
 **Phase 1B (real cluster execution): PARTIAL — requires explicit authorization.** Remaining:
-cluster creation, real image build/load (offline build impossible without staged wheels), and
-running the probe scenarios against the live Services. The corrected operator sequence is
-specified in docs/PHASE1B-RUNBOOK.md (documentation only).
+explicit human authorization (creation + scoped deployment only; deletion excluded), the real
+image build with network, and running the probe scenarios against the live Services. The
+corrected operator sequence (Stages A–F, STOP conditions, preservation) is specified in
+docs/PHASE1B-RUNBOOK.md (documentation only).
 
 Goal: a real isolated **Kind** environment with a healthy and a faulty service version and
 reproducible HTTP 500 failure evidence; evidence collection service.

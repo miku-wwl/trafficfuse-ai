@@ -1,5 +1,12 @@
 # TrafficFuse AI — Phase 1A.2: Final Preflight Corrections Report
 
+> **Correction note (2026-10-18, Phase 1B entry review):** the provenance model described in
+> finding P1-c item 3 below (facts carrying a `source="collector"` string consulted by
+> `plan_cluster_destroy`) was **superseded**: a caller-settable string is not a provenance
+> guarantee. Trust is now established by execution — see
+> [docs/PHASE1B-ENTRY-REVIEW.md](docs/PHASE1B-ENTRY-REVIEW.md). The text below is the
+> historical Phase 1A.2 record and is preserved unchanged.
+
 **Date:** 2026-10-18 · **Method:** offline implementation, tests and static validation only —
 no cluster was created, modified or deleted; no Kubernetes mutation was executed; no ambient
 kubeconfig or context was changed; no commit, push, tag or release was made; no Docker image

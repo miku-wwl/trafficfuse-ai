@@ -143,19 +143,58 @@ def test_cli_verify_refuses_unverified_ownership(repo_root: Path, tmp_path: Path
     assert "REFUSED" in captured.err
 
 
-def test_cli_create_and_destroy_still_refuse(repo_root: Path, tmp_path: Path, capsys) -> None:
+def _make_executor(*, nodes_fail: bool = False):
+    """Read-only collector mock: never contacts a cluster or Docker."""
+
+    def executor(argv):
+        argv = list(argv)
+        if "get" in argv and "nodes" in argv:
+            if nodes_fail:
+                from trafficfuse.lab.cluster_facts import CommandResult
+
+                return CommandResult(tuple(argv), 1, b"", b"connection refused")
+            document = {"items": [{"metadata": {"name": "trafficfuse-lab-control-plane"}}]}
+            return _ok(argv, json.dumps(document))
+        if "get" in argv and "namespace" in argv:
+            document = {
+                "metadata": {
+                    "name": NAMESPACE,
+                    "labels": {
+                        "trafficfuse.io/owner": CLUSTER_NAME,
+                        "app.kubernetes.io/managed-by": CLUSTER_NAME,
+                    },
+                }
+            }
+            return _ok(argv, json.dumps(document))
+        if argv[0] == "docker":
+            return _ok(argv, "/trafficfuse-lab-control-plane")
+        raise AssertionError(f"unexpected collector command: {' '.join(argv)}")
+
+    return executor
+
+
+def _ok(argv, text):
+    from trafficfuse.lab.cluster_facts import CommandResult
+
+    return CommandResult(tuple(argv), 0, text.encode(), b"")
+
+
+def test_cli_create_and_destroy_still_refuse(repo_root: Path, tmp_path: Path, capsys, monkeypatch) -> None:
+    kubeconfig = str(_kubeconfig(repo_root, tmp_path))
     assert (
         lifecycle_cli_main(
-            ["create", "--kubeconfig", str(_kubeconfig(repo_root, tmp_path)), "--authorized"]
+            ["create", "--kubeconfig", kubeconfig, "--authorized"]
         )
         == 2
     )
+    # destroy accepts no caller-supplied facts: without a collector execution
+    # it refuses at the collection gate.
     assert (
         lifecycle_cli_main(
             [
                 "destroy",
                 "--kubeconfig",
-                str(_kubeconfig(repo_root, tmp_path)),
+                kubeconfig,
                 "--receipt",
                 str(_record(tmp_path)),
                 "--authorized",
@@ -163,7 +202,35 @@ def test_cli_create_and_destroy_still_refuse(repo_root: Path, tmp_path: Path, ca
         )
         == 2
     )
+    captured = capsys.readouterr()
+    assert "no collector execution was performed" in captured.err
+    # With --collect the guard chain runs the (mocked) trusted collection and
+    # then reaches the deletion-scope refusal — no real subprocess, no cluster.
+    monkeypatch.setattr(
+        "trafficfuse.lab.cluster_facts.subprocess_executor", _make_executor()
+    )
     assert (
+        lifecycle_cli_main(
+            [
+                "destroy",
+                "--kubeconfig",
+                kubeconfig,
+                "--receipt",
+                str(_record(tmp_path)),
+                "--collect",
+                "--authorized",
+            ]
+        )
+        == 2
+    )
+    captured = capsys.readouterr()
+    assert "outside the Phase 1B authorization scope" in captured.err
+
+
+def test_cli_destroy_rejects_removed_facts_flag(repo_root: Path, tmp_path: Path, capsys) -> None:
+    # Regression: the Phase 1A.2 `destroy --facts` channel (caller-supplied
+    # JSON) no longer exists. argparse must reject it (exit code 2).
+    with pytest.raises(SystemExit) as excinfo:
         lifecycle_cli_main(
             [
                 "destroy",
@@ -176,10 +243,7 @@ def test_cli_create_and_destroy_still_refuse(repo_root: Path, tmp_path: Path, ca
                 "--authorized",
             ]
         )
-        == 2
-    )
-    err = capsys.readouterr().err
-    assert "not enabled in Phase 1A" in err
+    assert excinfo.value.code == 2
 
 
 def test_cli_preflight_prints_non_mutating_plan(capsys) -> None:

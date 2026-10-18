@@ -40,6 +40,18 @@
 > `AGENTS.md` and the pinned runtime untouched. See
 > [docs/PHASE1A2-FINAL-PREFLIGHT-REPORT.md](docs/PHASE1A2-FINAL-PREFLIGHT-REPORT.md) and
 > [docs/PHASE1B-RUNBOOK.md](docs/PHASE1B-RUNBOOK.md).
+>
+> **Phase 1B entry review — safe deployment gate: PASS.** Four findings corrected before any
+> execution: (1) the namespace/ownership-verification circular ordering — namespace bootstrap
+> now precedes the namespace-dependent collector read (Stages C→D); (2) direct cluster deletion
+> removed from the authorized Phase 1B sequence (preserve + separate cleanup authorization);
+> (3) spoofed collector provenance eliminated — trust is established by **execution**: facts
+> carry a private collector execution receipt minted only inside the collector, the destructive
+> gate performs the collection itself and accepts no caller facts, and the `source` string is
+> gone; (4) credential disclosure removed — kubeconfig identity comes from the trusted local
+> parser (endpoint + CA fingerprint only), outputs are redacted, and no raw kubeconfig view
+> command appears in the workflow. 327 offline tests green, 1 skipped. See
+> [docs/PHASE1B-ENTRY-REVIEW.md](docs/PHASE1B-ENTRY-REVIEW.md).
 
 ## What TrafficFuse AI is
 
@@ -164,6 +176,7 @@ trafficfuse-ai/
     ├── PHASE1A-REPORT.md
     ├── PHASE1A1-HARDENING-REPORT.md
     ├── PHASE1A2-FINAL-PREFLIGHT-REPORT.md
+    ├── PHASE1B-ENTRY-REVIEW.md
     ├── PHASE1B-RUNBOOK.md
     └── PHASE1-PREFLIGHT.md
 ```
@@ -184,7 +197,10 @@ trafficfuse-ai/
 - [docs/PHASE1A2-FINAL-PREFLIGHT-REPORT.md](docs/PHASE1A2-FINAL-PREFLIGHT-REPORT.md) — Phase 1A.2
   final preflight corrections: exact kubeconfig ownership, trusted live-facts collector,
   strict UTC timestamps, byte-preserving raw logs
+- [docs/PHASE1B-ENTRY-REVIEW.md](docs/PHASE1B-ENTRY-REVIEW.md) — Phase 1B entry review: safe
+  deployment gate (ordering, no deletion, execution-based trust, credential redaction)
 - [docs/PHASE1B-RUNBOOK.md](docs/PHASE1B-RUNBOOK.md) — corrected Phase 1B operator runbook
+  (Stages A–F, STOP conditions, preservation; no deletion)
   (documentation only; every mutating step requires explicit approval)
 
 ## License

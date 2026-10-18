@@ -356,13 +356,13 @@ def test_record_missing_required_fields_refused(tmp_path: Path) -> None:
 
 def test_pre_existing_unowned_cluster_refused(tmp_path: Path) -> None:
     # A cluster that merely carries the right *name* is not owned: no record.
+    # The creation-record gate refuses before any collection or trust decision.
     record_path = tmp_path / "missing-record.json"
     with pytest.raises(SafetyViolation, match="ownership receipt"):
         plan_cluster_destroy(
             kubeconfig_path=DEDICATED_KUBECONFIG,
             receipt_path=record_path,
             authorized=True,
-            cluster_facts=_facts(),
         )
 
 
@@ -396,16 +396,44 @@ def test_foreign_or_unowned_cluster_names_refused(name: str) -> None:
         validate_cluster_name(name)
 
 
-def test_destroy_without_verified_ownership_refused(tmp_path: Path) -> None:
-    record = _write_record(tmp_path / "record.json")
-    # Mismatched API server in collector-sourced (trusted transport) facts:
-    # the verification gate must refuse, not the caller-facts gate.
-    with pytest.raises(SafetyViolation, match="ownership could not be verified"):
+def test_destroy_without_verified_ownership_refused(repo_root: Path, tmp_path: Path) -> None:
+    # A collector execution whose live evidence does not match the creation
+    # record (wrong API server reported for the nodes context) must be
+    # refused at the verification gate — collection ran, ownership failed.
+    from trafficfuse.lab.cluster_facts import CommandResult, verify_live_ownership
+
+    kubeconfig = _write_kubeconfig(
+        repo_root / ".runtime" / "kubeconfig" / "trafficfuse-lab.yaml", _kubeconfig_document()
+    )
+    record = _write_record(
+        repo_root / "record.json", api_server="https://127.0.0.1:7777"
+    )
+
+    def executor(argv):
+        argv = list(argv)
+        if "get" in argv and "nodes" in argv:
+            document = {"items": [{"metadata": {"name": "trafficfuse-lab-control-plane"}}]}
+            return CommandResult(tuple(argv), 0, json.dumps(document).encode(), b"")
+        if "get" in argv and "namespace" in argv:
+            document = {"metadata": {"name": NAMESPACE, "labels": dict(OWNED_LABELS)}}
+            return CommandResult(tuple(argv), 0, json.dumps(document).encode(), b"")
+        if argv[0] == "docker":
+            return CommandResult(tuple(argv), 0, b"/trafficfuse-lab-control-plane", b"")
+        raise AssertionError(f"unexpected collector command: {' '.join(argv)}")
+
+    with pytest.raises(SafetyViolation, match="does not match the creation record"):
+        verify_live_ownership(
+            kubeconfig_path=kubeconfig, record_path=record, executor=executor
+        )
+    # The same mismatch reaches the destructive gate through its own
+    # collection: verified ownership evidence is required, and a matching
+    # cluster name alone is never deletion authority.
+    with pytest.raises(SafetyViolation, match="does not match the creation record"):
         plan_cluster_destroy(
-            kubeconfig_path=DEDICATED_KUBECONFIG,
+            kubeconfig_path=kubeconfig,
             receipt_path=record,
             authorized=True,
-            cluster_facts=_facts(api_server="https://127.0.0.1:7777", source="collector"),
+            executor=executor,
         )
 
 

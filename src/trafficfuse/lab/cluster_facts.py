@@ -1,20 +1,40 @@
 """Read-only live-facts collection for the trafficfuse-lab cluster.
 
-Phase 1A.2 (review finding P1): caller-supplied facts (a hand-written
-``cluster-facts.json``) can never be the sole proof of cluster ownership. This
-module implements the *trusted* side of the ownership trust model — a narrow,
-read-only collector whose facts are obtained directly from the target
-environment through explicitly scoped commands:
+Phase 1A.2 established the trusted side of the ownership model: a narrow,
+read-only collector whose facts come from the target environment through
+explicitly scoped commands. Phase 1B entry review found that the provenance
+was still expressed as a caller-settable string (``source="collector"``): any
+caller could construct matching facts and set that field, so the string was
+not a provenance guarantee.
 
-1. every command carries the dedicated kubeconfig and the exact context —
-   never the ambient selection;
-2. every command is checked against a read-only verb allowlist **before** the
-   executor runs (a mutating verb is refused even when an executor would run
-   it);
-3. any command failure, missing field or inconsistent observation fails
-   closed — partial facts are never returned;
-4. the collector never creates, repairs, recreates or migrates identity
-   evidence, and never infers ownership from a cluster name.
+This module now establishes trust by **execution**, not declaration:
+
+1. ``collect_live_facts()`` is the only code path that can produce
+   ``LiveFacts``, and it mints a private ``CollectorExecution`` receipt
+   (nonce + exact executed command trace) that caller-constructed objects
+   cannot carry. ``is_collector_executed()`` fails closed when the receipt is
+   absent — a forged or mismatched object is never trusted.
+2. ``verify_live_ownership()`` is the single trusted entry point: it performs
+   kubeconfig-document verification, creation-record verification, **the
+   collection itself** and the evidence cross-check inside one controlled
+   operation. It deliberately has **no facts parameter**: there is nothing a
+   caller can pass in to be trusted.
+3. Cluster identity (API server, CA fingerprint) is extracted from the
+   dedicated kubeconfig **file** through the trusted local parser
+   (``lifecycle.load_kubeconfig_document`` / ``verify_kubeconfig_document``).
+   The previous ``kubectl config view --raw --minify`` step is removed: that
+   command prints the complete kubeconfig — including client key material —
+   to the terminal, which is credential disclosure. ``kubectl config view``
+   also reads the local file, not the cluster, so live connectivity is proven
+   by the scoped ``get nodes`` / ``get namespace`` commands instead.
+4. Command output placed in operator-facing messages passes through
+   ``redact_for_message()`` (credential-shaped material stripped before any
+   message or exception text).
+
+Fail-closed rules preserved from Phase 1A.2: every command is checked against
+the read-only verb allowlist **before** execution, carries the dedicated
+kubeconfig and exact context (never the ambient selection), and any failure,
+missing field or inconsistent observation refuses the operation.
 
 This module **does not contact any cluster by itself**: the default executor
 uses ``subprocess`` and is only invoked by operator-run Phase 1B commands;
@@ -24,18 +44,24 @@ and live in ``lifecycle.py``.
 Trust model separation (all four stay distinct):
 
 1. creation-time identity recording  — ``lifecycle`` creation record (v2);
-2. read-only live-facts collection   — this module;
+2. read-only live-facts collection   — this module (execution-receipt bound);
 3. identity verification             — ``lifecycle.verify_ownership_evidence``;
 4. destructive-operation authorization — ``lifecycle.plan_cluster_destroy``,
-   which requires *collector-sourced* facts.
+   which performs the trusted collection itself and accepts no caller facts.
+
+Documented limitation (see docs/PHASE1B-ENTRY-REVIEW.md): the execution
+receipt is fail-closed defense-in-depth, **not** cryptographic authenticity.
+The real guarantees are the control-flow design (the destructive path
+collects itself), the read-only allowlist and the record cross-check.
+Complete trust guarantees require integration with a live Kind cluster.
 """
 
 from __future__ import annotations
 
-import base64
-import hashlib
 import json
+import re
 import subprocess
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
@@ -45,8 +71,6 @@ from trafficfuse.lab.lifecycle import (
     MANAGED_BY_LABEL_KEY,
     NAMESPACE,
     OWNERSHIP_LABEL_KEY,
-    CALLER_SOURCE,
-    COLLECTOR_SOURCE,
     ClusterFacts,
     KubeconfigIdentity,
     OwnershipVerification,
@@ -172,28 +196,106 @@ def subprocess_executor(argv: Sequence[str]) -> CommandResult:
     return CommandResult(tuple(argv), completed.returncode, completed.stdout, completed.stderr)
 
 
+# --- credential redaction (Phase 1B entry review, finding P2-b) ----------------------
+
+
+_PEM_BLOCK = re.compile(r"-----BEGIN [^-]+-----.*?-----END [^-]+-----", re.DOTALL)
+_BASE64_RUN = re.compile(r"[A-Za-z0-9+/]{40,}={0,2}")
+
+
+def redact_for_message(text: str) -> str:
+    """Strip credential-shaped material from command output before it is
+    placed in an operator-facing message, log or exception.
+
+    Defense-in-depth: the collector's own API surface never returns raw
+    kubeconfig content (identity comes from the trusted local parser, and
+    only the four identity fields are ever printed), but a failing command's
+    stderr is passed through here before it can reach a human. PEM blocks and
+    long base64 runs (client keys, certificates, tokens) become ``[REDACTED]``
+    and the result is truncated.
+    """
+    redacted = _PEM_BLOCK.sub("[REDACTED]", text)
+    redacted = _BASE64_RUN.sub("[REDACTED]", redacted)
+    return redacted.strip()[:400]
+
+
+# --- trusted collector output ---------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class CollectorExecution:
+    """Private receipt proving ``LiveFacts`` were produced by an actual
+    collector execution rather than by a caller constructing an object.
+
+    Minted only inside ``collect_live_facts()``. This is fail-closed
+    defense-in-depth and **not** cryptographic authenticity (see the module
+    docstring limitation note); its purpose is that forged, mismatched or
+    detached objects never satisfy a trust decision.
+    """
+
+    nonce: str
+    commands: tuple[tuple[str, ...], ...]
+
+
 @dataclass(frozen=True)
 class LiveFacts:
-    """Trusted live cluster facts, collected from the target environment."""
+    """Trusted live cluster facts, collected from the target environment.
+
+    Only ``collect_live_facts()`` can produce facts that carry a
+    ``CollectorExecution`` receipt; directly constructed instances have
+    ``execution=None`` and are never trusted anywhere.
+    """
 
     api_server: str
     ca_fingerprint_sha256: str
     node_names: tuple[str, ...]
     namespace_labels: Mapping[str, str] = field(default_factory=dict)
     docker_node_identities: tuple[str, ...] = ()
-    source: str = COLLECTOR_SOURCE
+    execution: CollectorExecution | None = None
 
-    def as_cluster_facts(self) -> ClusterFacts:
-        # Provenance must survive the conversion: collector-collected facts stay
-        # collector-sourced, so destructive authorization can trust them while
-        # caller-supplied JSON still cannot.
-        return ClusterFacts(
-            api_server=self.api_server,
-            ca_fingerprint_sha256=self.ca_fingerprint_sha256,
-            node_names=self.node_names,
-            namespace_labels=self.namespace_labels,
-            source=self.source,
-        )
+
+def is_collector_executed(facts: object) -> bool:
+    """True only for facts produced by an actual ``collect_live_facts`` run."""
+    return isinstance(facts, LiveFacts) and facts.execution is not None
+
+
+@dataclass(frozen=True)
+class TrustedOwnership:
+    """Outcome of the single trusted ownership verification operation.
+
+    Contains only non-sensitive identity and verification data; it never
+    carries kubeconfig credential material. ``commands`` is the exact
+    read-only command trace the collector executed, so an operator can audit
+    that collection actually happened (and only ever read).
+    """
+
+    identity: KubeconfigIdentity
+    verification: OwnershipVerification
+    facts: LiveFacts
+    commands: tuple[tuple[str, ...], ...]
+
+    @property
+    def verified(self) -> bool:
+        return self.verification.verified
+
+    def to_dict(self) -> dict[str, Any]:
+        """Redacted, minimal representation: identity + verification + the
+        executed read-only command trace. No credential fields exist here."""
+        return {
+            "identity": {
+                "context": self.identity.context,
+                "cluster": self.identity.cluster,
+                "api_server": self.identity.api_server,
+                "ca_fingerprint_sha256": self.identity.ca_fingerprint_sha256,
+            },
+            "verification": self.verification.to_dict(),
+            "live_facts": {
+                "node_names": list(self.facts.node_names),
+                "namespace_labels": dict(self.facts.namespace_labels),
+                "docker_node_identities": list(self.facts.docker_node_identities),
+            },
+            "collector_commands": [list(command) for command in self.commands],
+        }
 
 
 def _kubectl(kubeconfig: str, context: str, *args: str) -> list[str]:
@@ -205,7 +307,7 @@ def _require_ok(result: CommandResult, what: str) -> str:
         raise SafetyViolation(
             f"live facts collection failed ({what}): command "
             f"'{' '.join(result.argv)}' exited {result.returncode}: "
-            f"{result.stderr.decode('utf-8', 'replace').strip()[:400]}"
+            f"{redact_for_message(result.stderr.decode('utf-8', 'replace'))}"
         )
     return result.text().strip()
 
@@ -218,54 +320,26 @@ def collect_live_facts(
 ) -> LiveFacts:
     """Collect trusted live facts with explicitly scoped read-only commands.
 
-    Every command is allowlisted (read-only) *before* the executor is invoked,
-    carries the dedicated kubeconfig and exact context, and any failure or
-    missing field fails closed. The creation record supplies the expected
-    node identities to cross-check against Docker.
+    Identity (API server, CA fingerprint) is read from the dedicated
+    kubeconfig **file** through the trusted local parser — the raw kubeconfig
+    is never printed (credential-disclosure fix). Live connectivity and
+    ownership evidence come from scoped read-only commands: ``get nodes``,
+    ``get namespace <ns>`` and ``docker inspect`` per recorded node. Every
+    command is allowlisted and context-pinned before the executor runs, and
+    any failure or missing field fails closed. The returned facts carry a
+    ``CollectorExecution`` receipt; direct construction cannot forge one.
     """
     kubeconfig = validate_kubeconfig_path(kubeconfig_path)
     record = load_ownership_receipt(record_path)
+    document = load_kubeconfig_document(kubeconfig)
+    identity = verify_kubeconfig_document(document)
     kubeconfig_arg = str(kubeconfig)
-
-    view_argv = _kubectl(
-        kubeconfig_arg,
-        EXPECTED_CONTEXT,
-        "config",
-        "view",
-        "--raw",
-        "--minify",
-        "-o",
-        "json",
-    )
-    assert_read_only_command(view_argv)
-    view_document = json.loads(_require_ok(executor(view_argv), "cluster identity"))
-    try:
-        cluster_entry = view_document["clusters"][0]["cluster"]
-        api_server = cluster_entry["server"]
-        ca_data = cluster_entry["certificate-authority-data"]
-    except (KeyError, IndexError, TypeError) as exc:
-        raise SafetyViolation(
-            "live facts collection failed (cluster identity): the minified cluster "
-            "view lacks server or certificate-authority-data"
-        ) from exc
-    if not isinstance(api_server, str) or not api_server:
-        raise SafetyViolation(
-            "live facts collection failed (api server): server is not a non-empty string"
-        )
-    if not isinstance(ca_data, str) or not ca_data:
-        raise SafetyViolation(
-            "live facts collection failed (CA): certificate-authority-data is empty"
-        )
-    try:
-        ca_fingerprint = hashlib.sha256(base64.b64decode(ca_data, validate=True)).hexdigest()
-    except Exception as exc:  # binascii.Error and friends
-        raise SafetyViolation(
-            f"live facts collection failed (CA): invalid base64 CA data: {exc}"
-        ) from exc
+    commands: list[tuple[str, ...]] = []
 
     nodes_argv = _kubectl(kubeconfig_arg, EXPECTED_CONTEXT, "get", "nodes", "-o", "json")
     assert_read_only_command(nodes_argv)
     nodes_document = json.loads(_require_ok(executor(nodes_argv), "kind nodes"))
+    commands.append(nodes_argv)
     items = nodes_document.get("items") if isinstance(nodes_document, dict) else None
     if not isinstance(items, list) or not items:
         raise SafetyViolation(
@@ -281,9 +355,12 @@ def collect_live_facts(
             "live facts collection failed (kind nodes): every node must expose a name"
         )
 
-    namespace_argv = _kubectl(kubeconfig_arg, EXPECTED_CONTEXT, "get", "namespace", NAMESPACE, "-o", "json")
+    namespace_argv = _kubectl(
+        kubeconfig_arg, EXPECTED_CONTEXT, "get", "namespace", NAMESPACE, "-o", "json"
+    )
     assert_read_only_command(namespace_argv)
     namespace_document = json.loads(_require_ok(executor(namespace_argv), "namespace ownership"))
+    commands.append(namespace_argv)
     labels = {}
     if isinstance(namespace_document, dict):
         labels = namespace_document.get("metadata", {}).get("labels", {}) or {}
@@ -304,19 +381,23 @@ def collect_live_facts(
             node_name,
         ]
         assert_read_only_command(docker_argv)
-        identity = _require_ok(executor(docker_argv), f"docker node identity for {node_name}")
-        if not identity:
+        docker_identity = _require_ok(
+            executor(docker_argv), f"docker node identity for {node_name}"
+        )
+        commands.append(docker_argv)
+        if not docker_identity:
             raise SafetyViolation(
                 f"live facts collection failed (docker node identity): empty identity for {node_name}"
             )
-        docker_identities.append(identity)
+        docker_identities.append(docker_identity)
 
     return LiveFacts(
-        api_server=api_server,
-        ca_fingerprint_sha256=ca_fingerprint,
+        api_server=identity.api_server,
+        ca_fingerprint_sha256=identity.ca_fingerprint_sha256,
         node_names=node_names,
         namespace_labels=labels,
         docker_node_identities=tuple(docker_identities),
+        execution=CollectorExecution(nonce=uuid.uuid4().hex, commands=tuple(commands)),
     )
 
 
@@ -325,10 +406,24 @@ def verify_live_ownership(
     kubeconfig_path: Path | str,
     record_path: Path | str,
     executor: CommandExecutor = subprocess_executor,
-) -> tuple[KubeconfigIdentity, OwnershipVerification]:
-    """Full trusted ownership pipeline: kubeconfig document, creation record,
-    collector-sourced live facts, and evidence cross-check. No mutation, no
-    cluster contact beyond the read-only commands the collector allows."""
+) -> TrustedOwnership:
+    """The single trusted ownership pipeline — it collects, it does not receive.
+
+    1. dedicated kubeconfig path, document and offline identity verification
+       (exact context/cluster binding, local HTTPS API host, CA fingerprint
+       anchor, no foreign contexts, no embedded credentials) — via the trusted
+       local parser, never a command that prints the raw kubeconfig;
+    2. creation-record verification and identity cross-check;
+    3. **the collection itself**, through the read-only collector with an
+       explicitly scoped command set (this function has no facts parameter:
+       there is nothing a caller can pass in to be trusted);
+    4. evidence cross-check against the record (API server, CA fingerprint,
+       exact node identities, ownership labels, Docker node identity).
+
+    Any missing, mismatched or unverifiable evidence fails closed. The result
+    is a ``TrustedOwnership`` outcome whose facts carry the collector
+    execution receipt.
+    """
     document = load_kubeconfig_document(kubeconfig_path)
     identity = verify_kubeconfig_document(document)
     record = load_ownership_receipt(record_path)
@@ -345,10 +440,15 @@ def verify_live_ownership(
     facts = collect_live_facts(
         kubeconfig_path=kubeconfig_path, record_path=record_path, executor=executor
     )
-    verification = verify_ownership_evidence(record, facts.as_cluster_facts())
+    verification = verify_ownership_evidence(record, facts)
     if not verification.verified:
         raise SafetyViolation(
             "cluster ownership could not be verified: " + "; ".join(verification.failures)
+        )
+    if not verification.trusted:
+        raise SafetyViolation(
+            "collector execution receipt missing; facts were not collected "
+            "through the trusted collector execution path"
         )
     if OWNERSHIP_LABEL_KEY not in facts.namespace_labels:
         raise SafetyViolation("namespace ownership labels absent from live facts")
@@ -360,4 +460,9 @@ def verify_live_ownership(
             "docker node identities do not match the creation record exactly: "
             f"observed {sorted(expected_docker)}, expected {sorted(record['kind_node_names'])}"
         )
-    return identity, verification
+    return TrustedOwnership(
+        identity=identity,
+        verification=verification,
+        facts=facts,
+        commands=facts.execution.commands,
+    )

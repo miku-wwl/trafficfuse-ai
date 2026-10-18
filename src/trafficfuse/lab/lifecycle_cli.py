@@ -6,14 +6,19 @@ Subcommands:
 * ``verify``    — offline ownership verification. Two fact sources:
   ``--facts <file>`` (caller-supplied; checked but marked **untrusted**) or
   ``--collect`` (trusted read-only collection from the target environment via
-  ``trafficfuse.lab.cluster_facts``; executed by the operator in Phase 1B,
-  never by this CLI's own initiative — the CLI stays read-only either way).
-  Prints the per-check result; never contacts a cluster beyond the read-only
-  collector commands.
-* ``create`` / ``destroy`` — always refuse in Phase 1A; the guards run first so
-  the refusal reason is precise (missing authorization, missing/invalid record,
-  unverified or caller-supplied ownership evidence, wrong identity, ...). They
-  become mutating only after Phase 1B authorization.
+  ``trafficfuse.lab.cluster_facts.verify_live_ownership`` — one controlled
+  operation that verifies the kubeconfig document, the creation record and
+  the collected live facts; executed by the operator in Phase 1B, never by
+  this CLI's own initiative — the CLI stays read-only either way). The
+  ``--collect`` output is redacted: the four identity fields, the per-check
+  verification result, non-sensitive live facts and the exact read-only
+  command trace. No kubeconfig credential material is ever printed.
+* ``create`` / ``destroy`` — always refuse; the guards run first so the
+  refusal reason is precise (missing authorization, missing/invalid record,
+  missing trusted collection, unverified ownership, ...). ``destroy`` accepts
+  **no caller-supplied facts**: trust is established by the collector
+  execution the guard chain performs itself (``--collect``), and deletion is
+  outside the Phase 1B authorization scope regardless.
 
 Every future kubectl invocation built by this project carries the dedicated
 kubeconfig and the exact context explicitly (``lifecycle.kubectl_prefix()``);
@@ -31,7 +36,7 @@ Examples::
     # allowlisted read-only collector and yields trusted facts.
     python -m trafficfuse.lab.lifecycle_cli destroy \\
         --kubeconfig .runtime/kubeconfig/trafficfuse-lab.yaml \\
-        --receipt .runtime/state/cluster-trafficfuse-lab.json --authorized
+        --receipt .runtime/state/cluster-trafficfuse-lab.json --collect --authorized
 """
 
 from __future__ import annotations
@@ -86,7 +91,8 @@ def main(argv: list[str] | None = None) -> int:
         "--collect",
         action="store_true",
         help="collect trusted live facts read-only from the target environment "
-        "(Phase 1B operator command; allowlisted read-only commands only)",
+        "(Phase 1B operator command; allowlisted read-only commands only; the "
+        "output is redacted to non-sensitive identity information)",
     )
 
     create = subparsers.add_parser("create", help="refuses in Phase 1A (guarded)")
@@ -97,18 +103,20 @@ def main(argv: list[str] | None = None) -> int:
         help="explicit authorization flag; creation still refuses in Phase 1A",
     )
 
-    destroy = subparsers.add_parser("destroy", help="refuses in Phase 1A (guarded)")
+    destroy = subparsers.add_parser("destroy", help="refuses (guarded)")
     destroy.add_argument("--kubeconfig", required=True)
     destroy.add_argument("--receipt", required=True)
     destroy.add_argument(
-        "--facts",
-        default=None,
-        help="optional live cluster facts for ownership verification before refusal",
+        "--collect",
+        action="store_true",
+        help="perform the trusted read-only collection inside the guard chain "
+        "(refuses without it: caller-supplied facts are never accepted)",
     )
     destroy.add_argument(
         "--authorized",
         action="store_true",
-        help="explicit authorization flag; destruction still refuses in Phase 1A",
+        help="explicit authorization flag; deletion is outside the Phase 1B "
+        "authorization scope and still refuses",
     )
 
     args = parser.parse_args(argv)
@@ -121,35 +129,44 @@ def main(argv: list[str] | None = None) -> int:
                 sys.stderr.write("REFUSED: use either --facts or --collect, not both\n")
                 return 2
             if args.collect:
-                from trafficfuse.lab.cluster_facts import verify_live_ownership
+                from trafficfuse.lab.cluster_facts import (
+                    subprocess_executor,
+                    verify_live_ownership,
+                )
 
-                identity, verification = verify_live_ownership(
+                outcome = verify_live_ownership(
                     kubeconfig_path=args.kubeconfig,
                     record_path=args.receipt,
+                    executor=subprocess_executor,
                 )
+                payload = outcome.to_dict()
+                verified = outcome.verification.verified
+                trusted = outcome.verification.trusted
             elif args.facts:
                 identity, verification = verify_cluster_ownership(
                     kubeconfig_path=args.kubeconfig,
                     record_path=args.receipt,
                     facts=_load_facts(args.facts),
                 )
+                payload = {
+                    "identity": {
+                        "context": identity.context,
+                        "cluster": identity.cluster,
+                        "api_server": identity.api_server,
+                        "ca_fingerprint_sha256": identity.ca_fingerprint_sha256,
+                    },
+                    **verification.to_dict(),
+                }
+                verified = verification.verified
+                trusted = verification.trusted
             if not (args.collect or args.facts):
                 sys.stderr.write("REFUSED: verify requires --facts <file> or --collect\n")
                 return 2
-            payload = {
-                "identity": {
-                    "context": identity.context,
-                    "cluster": identity.cluster,
-                    "api_server": identity.api_server,
-                    "ca_fingerprint_sha256": identity.ca_fingerprint_sha256,
-                },
-                **verification.to_dict(),
-            }
             sys.stdout.write(json.dumps(payload, indent=2) + "\n")
-            if not verification.verified:
+            if not verified:
                 sys.stderr.write("REFUSED: ownership could not be verified\n")
                 return 2
-            if not verification.trusted:
+            if not trusted:
                 sys.stderr.write(
                     "WARNING: facts are caller-supplied and untrusted; they are "
                     "never sufficient proof for destructive operations\n"
@@ -157,11 +174,13 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "create":
             plan_cluster_create(kubeconfig_path=args.kubeconfig, authorized=args.authorized)
         else:
+            from trafficfuse.lab.cluster_facts import subprocess_executor
+
             plan_cluster_destroy(
                 kubeconfig_path=args.kubeconfig,
                 receipt_path=args.receipt,
                 authorized=args.authorized,
-                cluster_facts=_load_facts(args.facts) if args.facts else None,
+                executor=subprocess_executor if args.collect else None,
             )
     except SafetyViolation as exc:
         sys.stderr.write(f"REFUSED: {exc}\n")
