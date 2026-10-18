@@ -206,6 +206,14 @@ exact node identities, namespace ownership labels and Docker identities against
 the record. Output contains minimal identity, checks and the command trace.
 `--facts` is inspection-only and is not used here.
 
+The collector and creation recorder use an exact command-shape gate: scoped
+node JSON reads, this Namespace's JSON read, and two fixed Docker node identity
+projections. Configuration subcommands, extra options and duplicate scope flags
+are rejected. Identity parsing stays local. The operator's readiness, selector
+and log commands elsewhere in this runbook are separate explicitly scoped
+operations; they are not inputs to the collector executor. See the
+[security-gate report](PHASE1B-SECURITY-GATE-REPORT.md).
+
 `CollectorExecution` is a **forgeable Python diagnostic marker**. Its nonce is
 not a signature; `is_collector_executed()` and the legacy `trusted` output field
 only indicate marker presence. Neither proves collection or grants authority.

@@ -31,7 +31,7 @@ This module now establishes trust by **execution**, not declaration:
    message or exception text).
 
 Fail-closed rules preserved from Phase 1A.2: every command is checked against
-the read-only verb allowlist **before** execution, carries the dedicated
+the explicit command-shape allowlist **before** execution, carries the dedicated
 kubeconfig and exact context (never the ambient selection), and any failure,
 missing field or inconsistent observation refuses the operation.
 
@@ -67,6 +67,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 from trafficfuse.lab.lifecycle import (
+    CLUSTER_NAME,
     EXPECTED_CONTEXT,
     MANAGED_BY_LABEL_KEY,
     NAMESPACE,
@@ -84,14 +85,16 @@ from trafficfuse.lab.lifecycle import (
 
 MAX_COMMAND_TIMEOUT_SECONDS = 10.0
 
-# Read-only verbs the collector may request. Anything else — create, apply,
-# delete, patch, edit, scale, rollout, drain, taint, label, annotate,
-# replace, exec, cp, debug, ... — is refused before execution.
-_READ_ONLY_KUBECTL_VERBS = frozenset(
-    {"get", "describe", "config", "version", "cluster-info", "api-resources", "api-versions"}
+# Only these fixed Docker projections are needed by collection and creation
+# recording. Full container inspection could expose unrelated configuration.
+DOCKER_NODE_NAME_FORMAT = "{{.Name}}"
+DOCKER_KIND_IDENTITY_FORMAT = (
+    '{"name":{{json .Name}},"cluster":{{json (index .Config.Labels "io.x-k8s.kind.cluster")}},'
+    '"role":{{json (index .Config.Labels "io.x-k8s.kind.role")}}}'
 )
-_READ_ONLY_DOCKER_VERBS = frozenset({"inspect", "version", "ps"})
-_ALLOWED_BINARIES = {"kubectl", "docker"}
+_KIND_NODE_NAME = re.compile(
+    rf"{re.escape(CLUSTER_NAME)}-(?:control-plane|worker)(?:[2-9]|[1-9][0-9]+)?"
+)
 
 
 @dataclass(frozen=True)
@@ -118,82 +121,72 @@ class CommandResult:
 CommandExecutor = Callable[[Sequence[str]], CommandResult]
 
 
-# Flags that consume the following token as their value. The verb scanner must
-# skip these values, otherwise a value like the kubeconfig path would be
-# mistaken for the command verb. Boolean flags (e.g. --raw, --minify) need no
-# entry: they are simply ignored while scanning for the verb.
-_VALUE_FLAGS = frozenset(
-    {
-        "--kubeconfig",
-        "--context",
-        "--cluster",
-        "--user",
-        "--namespace",
-        "-n",
-        "-o",
-        "--output",
-        "-f",
-        "--filename",
-        "-l",
-        "--selector",
-        "--field-selector",
-        "--format",
-        "--type",
-    }
-)
-
-
-def _command_verb(argv: Sequence[str]) -> str | None:
-    """Return the command verb, or None when no positional verb exists.
-
-    Walks the tokens after the binary; a token that is the value of a
-    value-taking flag is skipped so it can never be mistaken for the verb.
-    """
-    skip_next = False
-    for token in argv[1:]:
-        if skip_next:
-            skip_next = False
-            continue
-        if token.startswith("-"):
-            if "=" not in token and token in _VALUE_FLAGS:
-                skip_next = True
-            continue
-        return token
-    return None
+def _validated_read_only_command(argv: Sequence[str]) -> tuple[str, ...]:
+    """Match the four host-generated forms; do not parse arbitrary CLI syntax."""
+    if (
+        isinstance(argv, (str, bytes))
+        or not isinstance(argv, Sequence)
+        or not argv
+        or any(
+            not isinstance(arg, str) or not arg or any(c in arg for c in "\0\r\n")
+            for arg in argv
+        )
+    ):
+        raise SafetyViolation("read-only collector requires a non-empty sequence of argument strings")
+    command = tuple(argv)
+    if command[0] not in ("kubectl", "docker"):
+        raise SafetyViolation(
+            "read-only collector only runs explicit kubectl and docker command shapes"
+        )
+    if command[0] == "kubectl" and len(command) in (9, 10):
+        if (
+            command[1] == "--kubeconfig"
+            and command[3:5] == ("--context", EXPECTED_CONTEXT)
+            and command[5:] in (
+                ("get", "nodes", "-o", "json"),
+                ("get", "namespace", NAMESPACE, "-o", "json"),
+            )
+        ):
+            try:
+                validate_kubeconfig_path(command[2])
+            except SafetyViolation:
+                raise SafetyViolation(
+                    "read-only collector requires the exact dedicated kubeconfig path"
+                ) from None
+            return command
+    if command[0] == "docker" and len(command) == 7:
+        if (
+            command[1:3] == ("inspect", "--format")
+            and command[3] in (DOCKER_NODE_NAME_FORMAT, DOCKER_KIND_IDENTITY_FORMAT)
+            and command[4:6] == ("--type", "container")
+            and len(command[6]) <= 63
+            and _KIND_NODE_NAME.fullmatch(command[6])
+        ):
+            return command
+    # Do not echo arbitrary rejected argv: it may contain credentials.
+    raise SafetyViolation("read-only collector refused unsupported command shape")
 
 
 def assert_read_only_command(argv: Sequence[str]) -> None:
-    """Refuse anything that is not an explicitly read-only inspection command."""
-    if not argv:
-        raise SafetyViolation("empty command refused by the read-only collector")
-    binary = Path(argv[0]).name
-    if binary not in _ALLOWED_BINARIES:
-        raise SafetyViolation(
-            f"read-only collector only runs {sorted(_ALLOWED_BINARIES)} commands, "
-            f"got {argv[0]!r}"
-        )
-    verb = _command_verb(argv)
-    if verb is None:
-        raise SafetyViolation(f"cannot determine the verb of command {' '.join(argv)}")
-    allowed = (
-        _READ_ONLY_KUBECTL_VERBS if binary == "kubectl" else _READ_ONLY_DOCKER_VERBS
-    )
-    if verb not in allowed:
-        raise SafetyViolation(
-            f"refusing non-read-only {binary} command: {' '.join(argv)} "
-            f"(allowed verbs: {', '.join(sorted(allowed))})"
-        )
+    """Require one exact scoped node/Namespace read or narrow Kind-node inspect.
+
+    All config subcommands, extra options/positionals, duplicate scope flags,
+    alternate binaries, shell wrappers and arbitrary Docker formats are denied.
+    This is a consumer command filter, not infrastructure authorization.
+    """
+    _validated_read_only_command(argv)
 
 
 def subprocess_executor(argv: Sequence[str]) -> CommandResult:
     """Default executor: runs the verified read-only command, capturing bytes."""
-    assert_read_only_command(argv)
+    command = _validated_read_only_command(argv)
     completed = subprocess.run(
-        list(argv),
+        list(command),
         capture_output=True,
         timeout=MAX_COMMAND_TIMEOUT_SECONDS,
+        shell=False,
     )
-    return CommandResult(tuple(argv), completed.returncode, completed.stdout, completed.stderr)
+    return CommandResult(command, completed.returncode, completed.stdout, completed.stderr)
 
 
 # --- credential redaction (Phase 1B entry review, finding P2-b) ----------------------
@@ -372,7 +365,7 @@ def collect_live_facts(
             "docker",
             "inspect",
             "--format",
-            "{{.Name}}",
+            DOCKER_NODE_NAME_FORMAT,
             "--type",
             "container",
             node_name,

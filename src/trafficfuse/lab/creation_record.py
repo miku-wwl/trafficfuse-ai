@@ -17,6 +17,7 @@ from pathlib import Path
 from trafficfuse.lab import lifecycle
 from trafficfuse.lab.cluster_facts import (
     CommandExecutor,
+    DOCKER_KIND_IDENTITY_FORMAT,
     assert_read_only_command,
     redact_for_message,
     subprocess_executor,
@@ -81,8 +82,7 @@ def record_cluster_creation(
     # A single JSON object keeps the observation bounded and easy to validate.
     container = read_json([
         "docker", "inspect", "--format",
-        '{"name":{{json .Name}},"cluster":{{json (index .Config.Labels "io.x-k8s.kind.cluster")}},'
-        '"role":{{json (index .Config.Labels "io.x-k8s.kind.role")}}}',
+        DOCKER_KIND_IDENTITY_FORMAT,
         "--type", "container", node,
     ])
     if container != {"name": f"/{node}", "cluster": lifecycle.CLUSTER_NAME, "role": "control-plane"}:

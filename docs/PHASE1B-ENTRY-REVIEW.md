@@ -213,8 +213,9 @@ wait complete → raw logs → validate → export with SHA-256 audit → report
 2. Live Kind integration remains **unverified**. It will not make these objects unforgeable;
    trusted host code, executors and process integrity remain assumptions. All verification
    here uses synthetic inputs and mocked executors.
-3. The collector's read-only allowlist covers exactly the verbs this project needs; extending
-   it requires a deliberate change to `_READ_ONLY_KUBECTL_VERBS` / `_READ_ONLY_DOCKER_VERBS`.
+3. The final security-gate hotfix replaces broad verb classification with four exact command
+   shapes. Extending collection requires a deliberate reviewed shape change and regression
+   tests; see [PHASE1B-SECURITY-GATE-REPORT.md](PHASE1B-SECURITY-GATE-REPORT.md).
 4. The Windows symlink-escape negative test remains skipped (platform privilege); the real
    traversal branch and a mocked-resolution test cover the logic.
 5. The creation record remains metadata. Independent live cross-checking is required, but

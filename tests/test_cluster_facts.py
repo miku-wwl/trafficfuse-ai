@@ -23,7 +23,6 @@ from trafficfuse.lab.cluster_facts import (
     is_collector_executed,
     subprocess_executor,
     verify_live_ownership,
-    _command_verb,
 )
 from trafficfuse.lab.lifecycle import (
     CLUSTER_NAME,
@@ -240,12 +239,12 @@ def test_collector_rejects_unknown_binary() -> None:
 
 
 def test_flag_values_are_never_mistaken_for_the_verb() -> None:
-    # Regression: a value-taking flag's value (e.g. the kubeconfig path, or a
-    # path containing a mutating-looking token) must not be scanned as the verb.
+    # Scope values occupy fixed slots. A valid read needs the actual canonical
+    # path; the old arbitrary /repo fixture would defeat the new scope gate.
     scoped = [
         "kubectl",
         "--kubeconfig",
-        "/repo/.runtime/kubeconfig/trafficfuse-lab.yaml",
+        str(lifecycle.canonical_kubeconfig_path()),
         "--context",
         "kind-trafficfuse-lab",
         "get",
@@ -254,13 +253,12 @@ def test_flag_values_are_never_mistaken_for_the_verb() -> None:
         "json",
     ]
     assert_read_only_command(scoped)  # must pass
-    verb = _command_verb(scoped)
-    assert verb == "get"
-    # A flag value that looks like a mutating verb is still not the verb.
-    assert _command_verb(["kubectl", "--kubeconfig", "delete", "get", "nodes"]) == "get"
-    # A command whose only positional is consumed as a flag value has no verb.
-    assert _command_verb(["kubectl", "--kubeconfig", "delete"]) is None
-    with pytest.raises(SafetyViolation, match="cannot determine the verb"):
+    for value in ("delete", "get", "config"):
+        forged_scope = list(scoped)
+        forged_scope[2] = value
+        with pytest.raises(SafetyViolation, match="read-only"):
+            assert_read_only_command(forged_scope)
+    with pytest.raises(SafetyViolation, match="read-only"):
         assert_read_only_command(["kubectl", "--kubeconfig", "delete"])
 
 
