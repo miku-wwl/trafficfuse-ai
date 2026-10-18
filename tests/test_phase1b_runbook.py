@@ -17,7 +17,12 @@ sequence — and enforce, without running anything:
 """
 
 import re
+import json
+import shutil
+import subprocess
 from pathlib import Path
+
+import pytest
 
 RUNBOOK = Path(__file__).resolve().parents[1] / "docs" / "PHASE1B-RUNBOOK.md"
 
@@ -41,16 +46,17 @@ REQUIRED_STAGE_LABELS = (
     "Namespace bootstrap",
     "Live ownership verification",
     "Application deployment",
-    "Probe execution",
+    "healthy HTTP baseline",
+    "faulty live-Service scenario",
     "Evidence export",
     "Preservation of resources for inspection",
 )
 
 
 def _command_lines() -> list[str]:
-    """Fenced bash command lines in document order (comments stripped)."""
+    """Fenced PowerShell command lines in document order (comments stripped)."""
     text = RUNBOOK.read_text(encoding="utf-8")
-    blocks = re.findall(r"```bash\n(.*?)```", text, re.DOTALL)
+    blocks = re.findall(r"```powershell\n(.*?)```", text, re.DOTALL)
     lines: list[str] = []
     for block in blocks:
         for raw in block.splitlines():
@@ -127,25 +133,29 @@ def test_probe_job_lifecycle_order() -> None:
     # The Job is created before waiting, completed before evidence export,
     # and logs come from the exact expected Job.
     lines = _command_lines()
-    apply_job = _first("apply -f deploy/lab/probe-job.yaml", lines)
-    wait_job = _first("wait --for=condition=complete job/trafficfuse-probe", lines)
-    logs = _first("logs job/trafficfuse-probe", lines)
-    export = _first("evidence_cli", lines)
-    assert apply_job < wait_job < logs <= export
+    for manifest, job, capture in (
+        ("probe-healthy-job.yaml", "trafficfuse-probe-healthy", "healthy.log"),
+        ("probe-job.yaml", "trafficfuse-probe", "live.log"),
+    ):
+        create_job = _first(f"create -f deploy/lab/{manifest}", lines)
+        wait_job = _first(f"wait --for=condition=complete job/{job} --timeout", lines)
+        logs = _first(f"logs job/{job} >", lines)
+        export = _first(f'evidence_cli --logs "$CaptureRoot/{capture}"', lines)
+        assert create_job < wait_job < logs < export
 
 
 def test_every_kubectl_command_pins_kubeconfig_and_context() -> None:
     lines = _command_lines()
-    definitions = [line for line in lines if line.startswith("KC=")]
+    definitions = [line for line in lines if line.startswith("$KC =")]
     assert len(definitions) >= 1, "the runbook must define the KC scoping variable"
     definition = definitions[0]
     assert "--kubeconfig" in definition
-    assert "--context kind-trafficfuse-lab" in definition
+    assert "'--context', 'kind-trafficfuse-lab'" in definition
     assert ".runtime/kubeconfig/trafficfuse-lab.yaml" in definition
-    kubectl_lines = [line for line in lines if line.startswith("kubectl ")]
+    kubectl_lines = [line for line in lines if re.search(r"(?:^|= )kubectl ", line)]
     assert kubectl_lines, "the runbook must contain kubectl commands"
     for line in kubectl_lines:
-        assert "$KC" in line, f"kubectl command without explicit scoping: {line}"
+        assert "@KC" in line, f"kubectl command without explicit scoping: {line}"
         if "delete" in line or "patch" in line or "edit" in line:
             raise AssertionError(f"mutating kubectl command in Phase 1B: {line}")
 
@@ -174,7 +184,7 @@ def test_stage_labels_and_stop_conditions_present() -> None:
     # A STOP condition after every critical stage (preflight, build, create,
     # bootstrap, verification, deployment, probe, export, preservation).
     assert len(re.findall(r"\*\*STOP\*\*", text)) >= 8, "each critical stage needs a STOP condition"
-    assert "separate explicit human authorization" in text
+    assert "separate explicit human\nauthorization" in text
     assert "no automatic cleanup" in text.lower() or "No automatic cleanup" in text
 
 
@@ -185,3 +195,69 @@ def test_runbook_orders_preflight_before_any_mutation() -> None:
     build = _first("docker build", lines)
     assert preflight < create
     assert preflight < build
+
+
+def test_full_fifteen_step_workflow_order_and_separate_scenarios():
+    text = RUNBOOK.read_text(encoding="utf-8")
+    assert re.findall(r"^## (\d+)\.", text, re.MULTILINE) == [str(i) for i in range(1, 16)]
+    lines = _command_lines()
+    milestones = [
+        "lifecycle_cli preflight", "docker build --pull", "kind create cluster",
+        "lifecycle_cli record-creation", "kind load docker-image",
+        "apply -f deploy/lab/namespace.yaml", "--collect",
+        "apply -f deploy/lab/healthy-deployment.yaml", "rollout status",
+        "get service trafficfuse-live", "create -f deploy/lab/probe-healthy-job.yaml",
+        "create -f deploy/lab/probe-job.yaml", 'logs job/trafficfuse-probe-healthy >',
+        'evidence_cli --logs "$CaptureRoot/healthy.log"',
+        'evidence_cli --logs "$CaptureRoot/live.log"', "$Summaries = foreach",
+    ]
+    positions = [_first(milestone, lines) for milestone in milestones]
+    assert positions == sorted(positions)
+    assert '`receipt_schema` | `"trafficfuse-ownership-record-v2"`' in text
+    assert "20 successes/20 errors" in text and "Do not require" in text
+
+
+def _pwsh(tmp_path, script):
+    executable = shutil.which("pwsh")
+    if not executable:
+        pytest.skip("PowerShell 7 required for shell execution checks")
+    path = tmp_path / "offline-shell-check.ps1"
+    path.write_text(script, encoding="utf-8")
+    return subprocess.run([executable, "-NoProfile", "-NonInteractive", "-File", str(path)], capture_output=True, text=True, encoding="utf-8", timeout=30, cwd=tmp_path)
+
+
+def test_powershell_runbook_parses_offline(tmp_path):
+    # Parse only: never invoke any command in the actual runbook.
+    commands = "\n".join(re.findall(r"```powershell\n(.*?)```", RUNBOOK.read_text(encoding="utf-8"), re.DOTALL))
+    source = tmp_path / "runbook-source.ps1"
+    source.write_text(commands, encoding="utf-8")
+    script = "$tokens = $null; $errors = $null\n"
+    script += "[System.Management.Automation.Language.Parser]::ParseFile('" + str(source).replace("'", "''") + "', [ref]$tokens, [ref]$errors) | Out-Null\n"
+    script += "if ($errors.Count) { $errors | ForEach-Object { $_.Message }; exit 1 }\n"
+    result = _pwsh(tmp_path, script)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_powershell_kubectl_and_kind_argument_expansion_offline(tmp_path):
+    # Execute ONLY extracted native call expressions against local stubs;
+    # everything else in the runbook (uv, docker, mutations) is excluded.
+    lines = _command_lines()
+    definition = next(line for line in lines if line.startswith("$KC ="))
+    script = definition + "\n"
+    script += "function kubectl { ConvertTo-Json -Compress -InputObject @('kubectl', $args) -Depth 4 }\n"
+    script += "function kind { ConvertTo-Json -Compress -InputObject @('kind', $args) -Depth 4 }\n"
+    invocations = []
+    for line in lines:
+        match = re.search(r"(?:^|= )((?:kubectl|kind) .*)", line)
+        if match:
+            invocations.append(match.group(1).split(" > ")[0])
+    script += "\n".join(invocations)
+    result = _pwsh(tmp_path, script)
+    assert result.returncode == 0, result.stderr
+    observed = [json.loads(line) for line in result.stdout.splitlines()]
+    assert len(observed) == len(invocations)
+    for binary, args in observed:
+        if binary == "kubectl":
+            assert args[:4] == ["--kubeconfig", ".runtime/kubeconfig/trafficfuse-lab.yaml", "--context", "kind-trafficfuse-lab"]
+        elif args != ["get", "clusters"]:
+            assert args[args.index("--name") + 1] == "trafficfuse-lab"

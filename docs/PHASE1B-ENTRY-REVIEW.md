@@ -1,5 +1,13 @@
 # TrafficFuse AI — Phase 1B Entry Review: Safe Deployment Gate
 
+> **Final hotfix correction (2026-10-19):** the execution marker is forgeable by
+> ordinary Python construction; it is not authentication. The corrected receipt
+> generator, dual probe workflow and PowerShell 7.4+ runbook are documented in
+> [PHASE1B-FINAL-HOTFIX-REPORT.md](PHASE1B-FINAL-HOTFIX-REPORT.md) and
+> [PHASE1B-RUNBOOK.md](PHASE1B-RUNBOOK.md). Results below are the historical entry
+> review baseline. Phase 1B readiness remains **PARTIAL**: real build/deployment
+> and in-cluster probes are unverified.
+
 **Date:** 2026-10-18 · **Method:** offline implementation, tests and static validation only —
 no cluster was created, modified or deleted; no Kubernetes mutation was executed; no ambient
 kubeconfig or context was changed; no Docker image was built, pulled or loaded; no commit, push,
@@ -64,11 +72,12 @@ supplies.)
 
 ### `src/trafficfuse/lab/cluster_facts.py` (rewritten)
 
-1. **Trust by execution, not declaration (P2-a provenance).** `LiveFacts` now carries a private
-   `CollectorExecution` receipt (per-run nonce + exact executed command trace) that is minted
-   **only inside `collect_live_facts()`**. `is_collector_executed()` fails closed when the
-   receipt is absent. The `source` string and the `COLLECTOR_SOURCE`/`CALLER_SOURCE` constants
-   are **removed**; there is no field left to spoof.
+1. **Controlled collection (P2-a provenance).** Normal collection attaches a
+   `CollectorExecution` diagnostic marker (nonce + command trace). Both it and
+   `LiveFacts` can be constructed directly. `is_collector_executed()` checks marker
+   presence only, and a forged marker returns True. The `source` string and the
+   `COLLECTOR_SOURCE`/`CALLER_SOURCE` constants are removed, but this does not provide
+   cryptographic authenticity. Security depends on the controlled collection path.
 2. **`verify_live_ownership()` is the single trusted entry point** returning a
    `TrustedOwnership` outcome. It performs kubeconfig-document verification, creation-record
    verification, **the collection itself**, and the evidence cross-check inside one controlled
@@ -86,8 +95,8 @@ supplies.)
 ### `src/trafficfuse/lab/lifecycle.py`
 
 1. `ClusterFacts` loses `source` (no caller-settable provenance); `verify_ownership_evidence()`
-   computes `trusted` from the collector execution receipt (deferred import of
-   `is_collector_executed` breaks the module cycle).
+   computes the legacy diagnostic `trusted` field from marker presence (deferred
+   import of `is_collector_executed` breaks the module cycle). This is not authority.
 2. **`plan_cluster_destroy()` no longer accepts facts at all.** Its signature is
    `(*, kubeconfig_path, receipt_path, authorized, executor=None)`; it performs the trusted
    collection itself (deferred import of `verify_live_ownership`) and accepts **no**
@@ -196,20 +205,21 @@ wait complete → raw logs → validate → export with SHA-256 audit → report
 
 ## 6. Trusted ownership verification — limitations (explicit)
 
-1. The `CollectorExecution` receipt is **fail-closed defense-in-depth, not cryptographic
-   authenticity**. An attacker with source access could forge a `LiveFacts` object, but it
-   would still fail every trust decision: the destructive gate performs the collection itself
-   and never consults caller-provided facts. The real guarantees are the control-flow design,
-   the read-only command allowlist and the record cross-check.
-2. Complete trust guarantees require integration with a **live Kind cluster** — which Phase 1B
-   performs under explicit human authorization. All verification in this phase is offline with
-   mocked executors.
+1. `CollectorExecution` is **not cryptographic authenticity**. Ordinary Python code can
+   construct matching `LiveFacts` and a marker; the helper and diagnostic `trusted` field
+   then return True. Those results do not prove execution or authorize action. The actual
+   boundary is `verify_live_ownership()` performing independent collection inside trusted
+   host control flow, with no caller-facts parameter. Deletion remains disabled regardless.
+2. Live Kind integration remains **unverified**. It will not make these objects unforgeable;
+   trusted host code, executors and process integrity remain assumptions. All verification
+   here uses synthetic inputs and mocked executors.
 3. The collector's read-only allowlist covers exactly the verbs this project needs; extending
    it requires a deliberate change to `_READ_ONLY_KUBECTL_VERBS` / `_READ_ONLY_DOCKER_VERBS`.
 4. The Windows symlink-escape negative test remains skipped (platform privilege); the real
    traversal branch and a mocked-resolution test cover the logic.
-5. The creation record remains metadata; ownership proof is the live-facts cross-check through
-   the trusted collector, which first becomes meaningful when the cluster exists (Phase 1B).
+5. The creation record remains metadata. Independent live cross-checking is required, but
+   neither labels nor creation metadata prove historical ownership on their own. The final
+   runbook records actual post-creation identity and requires independent collection later.
 
 ---
 

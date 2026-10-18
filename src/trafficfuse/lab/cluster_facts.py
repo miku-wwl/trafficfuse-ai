@@ -9,11 +9,10 @@ not a provenance guarantee.
 
 This module now establishes trust by **execution**, not declaration:
 
-1. ``collect_live_facts()`` is the only code path that can produce
-   ``LiveFacts``, and it mints a private ``CollectorExecution`` receipt
-   (nonce + exact executed command trace) that caller-constructed objects
-   cannot carry. ``is_collector_executed()`` fails closed when the receipt is
-   absent — a forged or mismatched object is never trusted.
+1. ``collect_live_facts()`` attaches a ``CollectorExecution`` diagnostic
+   marker (nonce + command trace). Python callers can construct both facts
+   and markers. ``is_collector_executed()`` only checks marker presence; it
+   provides no cryptographic authenticity or execution authorization.
 2. ``verify_live_ownership()`` is the single trusted entry point: it performs
    kubeconfig-document verification, creation-record verification, **the
    collection itself** and the evidence cross-check inside one controlled
@@ -53,7 +52,8 @@ Documented limitation (see docs/PHASE1B-ENTRY-REVIEW.md): the execution
 receipt is fail-closed defense-in-depth, **not** cryptographic authenticity.
 The real guarantees are the control-flow design (the destructive path
 collects itself), the read-only allowlist and the record cross-check.
-Complete trust guarantees require integration with a live Kind cluster.
+Live Kind integration remains unverified. It cannot make Python objects
+unforgeable; trusted host code, executors and process integrity are assumed.
 """
 
 from __future__ import annotations
@@ -224,13 +224,11 @@ def redact_for_message(text: str) -> str:
 
 @dataclass(frozen=True)
 class CollectorExecution:
-    """Private receipt proving ``LiveFacts`` were produced by an actual
-    collector execution rather than by a caller constructing an object.
+    """Forgeable Python diagnostic marker, normally attached by the collector.
 
-    Minted only inside ``collect_live_facts()``. This is fail-closed
-    defense-in-depth and **not** cryptographic authenticity (see the module
-    docstring limitation note); its purpose is that forged, mismatched or
-    detached objects never satisfy a trust decision.
+    The nonce is an identifier, not a signature. Neither it nor the command
+    trace proves execution. Security decisions must use controlled collection
+    and independent checks, never this object alone.
     """
 
     nonce: str
@@ -241,9 +239,8 @@ class CollectorExecution:
 class LiveFacts:
     """Trusted live cluster facts, collected from the target environment.
 
-    Only ``collect_live_facts()`` can produce facts that carry a
-    ``CollectorExecution`` receipt; directly constructed instances have
-    ``execution=None`` and are never trusted anywhere.
+    Normal collection attaches a diagnostic marker. Both this dataclass and
+    the marker can also be constructed directly by Python callers.
     """
 
     api_server: str
@@ -255,7 +252,7 @@ class LiveFacts:
 
 
 def is_collector_executed(facts: object) -> bool:
-    """True only for facts produced by an actual ``collect_live_facts`` run."""
+    """Check marker presence only; True is not proof of collection or authority."""
     return isinstance(facts, LiveFacts) and facts.execution is not None
 
 
@@ -265,8 +262,8 @@ class TrustedOwnership:
 
     Contains only non-sensitive identity and verification data; it never
     carries kubeconfig credential material. ``commands`` is the exact
-    read-only command trace the collector executed, so an operator can audit
-    that collection actually happened (and only ever read).
+    read-only command trace from normal collector execution. This Python
+    object and its trace are also forgeable; they are not signed attestations.
     """
 
     identity: KubeconfigIdentity
@@ -327,7 +324,7 @@ def collect_live_facts(
     ``get namespace <ns>`` and ``docker inspect`` per recorded node. Every
     command is allowlisted and context-pinned before the executor runs, and
     any failure or missing field fails closed. The returned facts carry a
-    ``CollectorExecution`` receipt; direct construction cannot forge one.
+    forgeable ``CollectorExecution`` diagnostic marker, not proof of origin.
     """
     kubeconfig = validate_kubeconfig_path(kubeconfig_path)
     record = load_ownership_receipt(record_path)

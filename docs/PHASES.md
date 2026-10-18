@@ -54,9 +54,9 @@ docs/PHASE1B-RUNBOOK.md.
 execution: (1) namespace bootstrap now precedes the namespace-dependent ownership-collector
 read (Stages C→D of the runbook; the old sequence was circular); (2) direct cluster deletion
 removed from the authorized Phase 1B workflow (preservation + separate cleanup authorization;
-regression-tested); (3) spoofed collector provenance eliminated — trust by execution: a private
-collector execution receipt minted only inside the collector, a destructive gate that performs
-the collection itself and accepts no caller facts, and the `source` string removed; (4)
+regression-tested); (3) the destructive gate performs independent collection and accepts no
+caller facts; the `source` string is removed. Collector markers remain forgeable Python
+objects and do not provide authentication or authority (final hotfix correction); (4)
 credential disclosure removed — kubeconfig identity via the trusted local parser (endpoint + CA
 fingerprint only), redacted outputs, no raw kubeconfig view command. 327 offline tests green,
 1 skipped; see docs/PHASE1B-ENTRY-REVIEW.md.
@@ -64,8 +64,9 @@ fingerprint only), redacted outputs, no raw kubeconfig view command. 327 offline
 **Phase 1B (real cluster execution): PARTIAL — requires explicit authorization.** Remaining:
 explicit human authorization (creation + scoped deployment only; deletion excluded), the real
 image build with network, and running the probe scenarios against the live Services. The
-corrected operator sequence (Stages A–F, STOP conditions, preservation) is specified in
-docs/PHASE1B-RUNBOOK.md (documentation only).
+corrected operator sequence (PowerShell 7.4+, 15 ordered steps, STOP conditions,
+preservation) is specified in docs/PHASE1B-RUNBOOK.md. The final offline hotfix
+and remaining deployment blockers are recorded in docs/PHASE1B-FINAL-HOTFIX-REPORT.md.
 
 Goal: a real isolated **Kind** environment with a healthy and a faulty service version and
 reproducible HTTP 500 failure evidence; evidence collection service.

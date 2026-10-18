@@ -3,6 +3,8 @@
 Subcommands:
 
 * ``preflight`` — validate the future create request, print the non-mutating plan.
+* ``record-creation`` — after authorized creation, collect identity read-only
+  and write validated local metadata (not ownership proof or mutation authority).
 * ``verify``    — offline ownership verification. Two fact sources:
   ``--facts <file>`` (caller-supplied; checked but marked **untrusted**) or
   ``--collect`` (trusted read-only collection from the target environment via
@@ -78,6 +80,11 @@ def main(argv: list[str] | None = None) -> int:
     preflight = subparsers.add_parser("preflight", help="print a non-mutating plan")
     preflight.add_argument("--kubeconfig", required=True)
 
+    record = subparsers.add_parser("record-creation", help="record actual post-creation identity")
+    record.add_argument("--kubeconfig", required=True)
+    record.add_argument("--receipt", required=True)
+    record.add_argument("--authorized", action="store_true", help="attest explicit approval for this cluster creation workflow")
+
     verify = subparsers.add_parser("verify", help="offline ownership verification")
     verify.add_argument("--kubeconfig", required=True)
     verify.add_argument("--receipt", required=True)
@@ -124,6 +131,17 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "preflight":
             plan = build_preflight_plan(kubeconfig_path=args.kubeconfig)
             sys.stdout.write(json.dumps(plan.to_dict(), indent=2) + "\n")
+        elif args.command == "record-creation":
+            from trafficfuse.lab.creation_record import record_cluster_creation
+            from trafficfuse.lab.cluster_facts import subprocess_executor
+
+            record = record_cluster_creation(
+                kubeconfig_path=args.kubeconfig,
+                receipt_path=args.receipt,
+                authorized=args.authorized,
+                executor=subprocess_executor,
+            )
+            sys.stdout.write(json.dumps(record, indent=2) + "\n")
         elif args.command == "verify":
             if args.facts and args.collect:
                 sys.stderr.write("REFUSED: use either --facts or --collect, not both\n")

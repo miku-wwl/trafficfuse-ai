@@ -19,7 +19,7 @@ BASELINE_FILES = [
     "service-live.yaml",
     "service-versions.yaml",
 ]
-ALL_FILES = BASELINE_FILES + ["probe-job.yaml"]
+ALL_FILES = BASELINE_FILES + ["probe-job.yaml", "probe-healthy-job.yaml"]
 
 EXPECTED_NAMESPACE = "trafficfuse-system"
 EXPECTED_CLUSTER = "trafficfuse-lab"
@@ -246,7 +246,7 @@ def test_lab_package_does_not_import_shared_runtime() -> None:
 
 def test_manifests_use_never_pull_policy_for_kind_loaded_image() -> None:
     # The image is loaded into the kind node; it must never be pulled.
-    for name in ("healthy-deployment.yaml", "faulty-deployment.yaml", "probe-job.yaml"):
+    for name in ("healthy-deployment.yaml", "faulty-deployment.yaml", "probe-job.yaml", "probe-healthy-job.yaml"):
         for container in _containers(_load(name)[0]):
             assert container["image"] == EXPECTED_IMAGE_TAG
             assert container["imagePullPolicy"] == "Never", name

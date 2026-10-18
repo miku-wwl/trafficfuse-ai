@@ -1,0 +1,61 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: trafficfuse-probe-healthy
+  namespace: trafficfuse-system
+  labels:
+    app.kubernetes.io/name: trafficfuse
+    app.kubernetes.io/part-of: trafficfuse
+    app.kubernetes.io/managed-by: trafficfuse-lab
+    trafficfuse.io/owner: trafficfuse-lab
+    trafficfuse.io/role: probe
+  annotations:
+    trafficfuse.io/manifest-source: deploy/lab/probe-healthy-job.yaml
+    # Operator-started, read-only HTTP baseline. Excluded from kustomization.
+    # Full measured evidence is printed between the existing evidence markers.
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app: trafficfuse
+        trafficfuse.io/owner: trafficfuse-lab
+        trafficfuse.io/role: probe
+    spec:
+      automountServiceAccountToken: false
+      restartPolicy: Never
+      containers:
+        - name: probe
+          image: trafficfuse-lab-service:phase1a
+          imagePullPolicy: Never
+          command: ["python", "-m", "trafficfuse.lab.probe_cli"]
+          args:
+            - --url
+            - http://trafficfuse-healthy.trafficfuse-system.svc.cluster.local
+            - --path
+            - /checkout
+            - --scenario-id
+            - phase1b-healthy
+            - --target-label
+            - service:trafficfuse-healthy
+            - --requests
+            - "40"
+            - --concurrency
+            - "4"
+            - --timeout
+            - "5"
+            - --output
+            - /evidence/probe-healthy.json
+          volumeMounts:
+            - name: evidence
+              mountPath: /evidence
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 128Mi
+      volumes:
+        - name: evidence
+          emptyDir: {}

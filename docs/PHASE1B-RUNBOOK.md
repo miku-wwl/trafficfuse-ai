@@ -1,389 +1,388 @@
-# TrafficFuse AI — Phase 1B Operator Runbook (Safe Deployment Gate)
+# TrafficFuse AI — Phase 1B Operator Runbook
 
-**Status:** documentation only — **no command in this runbook has been executed.**
-This is the corrected, safety-scoped Phase 1B sequence (Stages A–F). Phase 1B
-authorization covers **cluster creation and scoped deployment only**. The
-environment is **preserved** at the end: cleanup is outside this scope and
-requires a separate explicit human authorization with its own guard chain.
-Nothing here is permission to mutate; every mutating stage names its
-prerequisites, and every critical stage ends with a **STOP** condition.
+**PHASE1B_READINESS=PARTIAL — DOCKER_BUILD_STATUS=BUILD_NOT_VERIFIED.**
+This sequence is prepared and checked offline. Docker build, Kind creation,
+deployment and in-cluster HTTP evidence have **not** been verified. Do not run
+this document automatically. Written, task-specific approval is required first.
+See [the final hotfix report](PHASE1B-FINAL-HOTFIX-REPORT.md).
 
-This runbook supersedes the Phase 1A.2 sequence, which had a **circular
-ordering defect**: ownership verification ran before the namespace existed,
-so the collector's namespace read could never succeed on a fresh cluster.
-The corrected order bootstraps the namespace first (Stage C) and verifies
-ownership afterwards (Stage D). Image loading now also happens **after**
-cluster creation (a kind image loads into the nodes of an existing cluster),
-and cluster identity is extracted through the **trusted local parser** — no
-command that dumps the whole kubeconfig (with client key material) is used
-anywhere.
+## Shell and exact identities
 
----
-
-## 0. Exact identities (pin these; nothing else is a valid target)
+Use **PowerShell 7.4 or newer**, launched with `pwsh -NoProfile` from the
+repository root. Windows PowerShell 5.1, Bash and WSL are not the shell for
+these examples. Version 7.4+ preserves native stdout bytes with `>`; do not
+replace log capture with a PowerShell text pipeline, `Out-File` or `Tee-Object`.
+Run stages individually, inspect their output and stop on any failure.
 
 | Identity | Exact value |
 | --- | --- |
-| Cluster | `trafficfuse-lab` |
-| Context | `kind-trafficfuse-lab` (**never** `kind-trafficfuse-system` — that string is a namespace, not a context) |
+| Kind cluster | `trafficfuse-lab` (single control-plane) |
+| Context | `kind-trafficfuse-lab` |
 | Namespace | `trafficfuse-system` |
-| Kind node | `trafficfuse-lab-control-plane` (single node) |
-| Dedicated kubeconfig | `.runtime/kubeconfig/trafficfuse-lab.yaml` (repository-owned path) |
+| Dedicated kubeconfig | `.runtime/kubeconfig/trafficfuse-lab.yaml` |
 | Creation record | `.runtime/state/cluster-trafficfuse-lab.json` |
-| Image | `trafficfuse-lab-service:phase1a` (built from `deploy/lab/Dockerfile`) |
-| Live Service | `trafficfuse-live` (ClusterIP :80, selector `version=faulty`) |
-| Version Services | `trafficfuse-healthy`, `trafficfuse-faulty` (ClusterIP :80) |
-| Deployments | `trafficfuse-healthy`, `trafficfuse-faulty` (container port 8080) |
-| Probe Job | `trafficfuse-probe` (applied on demand; not in the kustomization) |
-| Artifacts root | `artifacts/phase1b/<run-id>/` (git-ignored) |
+| Image | `trafficfuse-lab-service:phase1a` |
+| Live Service | `trafficfuse-live`, initially `app=trafficfuse,version=faulty` |
+| Healthy Service | `trafficfuse-healthy`, `app=trafficfuse,version=healthy` |
+| Healthy Job / scenario | `trafficfuse-probe-healthy` / `phase1b-healthy` |
+| Faulty live Job / scenario | `trafficfuse-probe` / `phase1b-live` |
 
-**Foreign-cluster protections.** `incident-lab`, `pcp-dev`, `playground-crd` and
-`vmware-k8s` belong to other projects and are never valid targets; `vmware-k8s`
-is non-disposable and must never be read from or written to. The ambient
-`kubectl` context at Phase 1A time is the foreign `kind-playground-crd` — it is
-never selected, switched or relied upon; the ambient context is never used at
-any step. Every `kubectl` invocation below carries **both** flags via one
-variable:
+`incident-lab`, `pcp-dev`, `playground-crd`, and `vmware-k8s` are protected.
+Never select or access their contexts. Do not change the ambient context.
+Every kubectl call uses the argument array below; `@KC` splats four separate
+arguments. Never store all flags in one string.
 
-```bash
-KC="--kubeconfig .runtime/kubeconfig/trafficfuse-lab.yaml --context kind-trafficfuse-lab"
+```powershell
+if ($PSVersionTable.PSVersion -lt [version]'7.4') { throw 'PowerShell 7.4+ required' }
+$ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
+function Assert-NativeSuccess {
+    if ($LASTEXITCODE -ne 0) { throw "Native command failed: exit $LASTEXITCODE; STOP" }
+}
+$KC = @('--kubeconfig', '.runtime/kubeconfig/trafficfuse-lab.yaml', '--context', 'kind-trafficfuse-lab')
+$SessionId = 'phase1b-001'  # operator-approved, fresh ID; never reuse a directory
+$HealthyRunId = "$SessionId-healthy"
+$LiveRunId = "$SessionId-live"
+$CaptureRoot = "artifacts/phase1b/captures-$SessionId"
 ```
 
-(namespace via `-n trafficfuse-system`). If any command is ever run without
-these flags, stop and re-issue it with them.
+## 1. Read-only preflight and authorization check
 
----
-
-## Stage A — Read-only preflight (always first; no mutation)
-
-### A1. Repository and state verification
-
-```bash
-git status --short                       # must be clean or understood
-git rev-parse HEAD                       # record the exact commit in the report
-git rev-parse origin/main                # HEAD == origin/main before starting
-sha1sum AGENTS.md                        # unchanged (Phase 1A.2: 03870389d009b3d2…)
-uv run python -m pytest -q               # full suite green (Phase 1B entry baseline: 327 passed, 1 skipped)
-uv lock --check && uv sync --locked      # dependency pins unchanged (AIG 0.2.0 @ 7261fdd2…)
-```
-
-Stop and report if `AGENTS.md` differs, the suite is red, or HEAD has drifted
-from `origin/main`. These are gates, not chores.
-
-### A2. Approval gate (mutating stages need this first)
-
-Written user approval naming, explicitly: cluster `trafficfuse-lab`, its
-**creation**, the locally mutating image build with network access, and the run
-id(s). Creation and scoped deployment only — **deletion is not part of this
-authorization**. No implicit consent; no approval carried over from a previous
-phase; no automatic retry of any mutating step whose outcome is ambiguous.
-
-### A3. Preconditions
-
-```bash
-docker version --format '{{.Server.Version}}'   # daemon reachable
-kind get clusters                                # trafficfuse-lab must NOT be listed
-```
-
-If a cluster named `trafficfuse-lab` already exists, **stop** — do not adopt,
-reuse or overwrite it; report the finding. (kind's default API-server port is
-randomized, so no port reservation is needed; ports `8000/8080/8081/8443` remain
-the allowed app bind set, `5000` is never used.)
-
-### A4. Kubeconfig preparation and image build inputs
-
-```bash
-mkdir -p .runtime/kubeconfig
-# The file is created by `kind create cluster --kubeconfig …` in Stage B.
-# Never pass or edit the global kubeconfig; never point kubectl at it.
-```
-
-The dedicated path is validated by `lifecycle.validate_kubeconfig_path()` —
-exact resolved repository-owned path; the global kubeconfig and any path
-outside the verified repository root are refused (including a foreign
-repository with an identical directory layout). Verify the image build inputs
-are present and pinned:
-
-```bash
-uv run python -m pytest tests/test_lab_manifests.py -q   # image pin parity with uv.lock
-```
-
-### A5. Offline preflight (still no mutation)
-
-```bash
+```powershell
+git status --short
+Assert-NativeSuccess
+git rev-parse HEAD
+Assert-NativeSuccess
+git rev-parse origin/main
+Assert-NativeSuccess
+Get-FileHash AGENTS.md -Algorithm SHA256
+uv lock --check
+Assert-NativeSuccess
+uv sync --locked
+Assert-NativeSuccess
+uv pip check
+Assert-NativeSuccess
+uv run pytest -q
+Assert-NativeSuccess
 uv run python -m trafficfuse.lab.lifecycle_cli preflight --kubeconfig .runtime/kubeconfig/trafficfuse-lab.yaml
+Assert-NativeSuccess
 ```
 
-Review the non-mutating plan (corrected Stage B–F ordering). `create` is
-unlocked only by the Stage A2 approval; it still refuses in code — the plan is
-for human review, not blind execution.
+Record HEAD and the understood working tree. Review any divergence from
+`origin/main`; do not silently reset. AGENTS.md SHA-256 must remain
+`30fab17cc82e831a23edb15fa03bfb22821a0be24bbc24f2b94e094e287580be`.
+AIG must remain installed at 0.2.0, pinned to
+`7261fdd2f47d2b15fabe8faac527eeee37338eb1`, default five-second budget.
+The lifecycle `create`/`destroy` commands still refuse; the printed preflight
+plan is for review only.
 
-> **STOP** — do not proceed without the written Stage A2 approval naming
-> creation (not deletion), the image build, and the run ids.
+Written approval must name this new disposable local cluster, dedicated path,
+image build including network pulls, image loading, Namespace/Deployment/Service
+creation, **both** probe Jobs and their HTTP GETs, the run IDs, read-only identity
+collection and local artifacts. It does not grant future traffic switching,
+AI diagnosis, Plan Approval, Action Authorization, or cleanup permission.
 
----
+After authorization, inspect only local tooling and cluster names:
 
-## Stage B — Docker image build (locally mutating; approval required)
+```powershell
+docker version --format '{{.Server.Version}}'
+Assert-NativeSuccess
+kind get clusters
+Assert-NativeSuccess
+if (Test-Path .runtime/kubeconfig/trafficfuse-lab.yaml) { throw 'Existing kubeconfig; STOP, no overwrite/adoption' }
+if (Test-Path .runtime/state/cluster-trafficfuse-lab.json) { throw 'Existing record; STOP, no overwrite/adoption' }
+if (Test-Path $CaptureRoot) { throw 'Capture path already exists; STOP' }
+if (Test-Path "artifacts/phase1b/$HealthyRunId") { throw 'Healthy export already exists; STOP' }
+if (Test-Path "artifacts/phase1b/$LiveRunId") { throw 'Live export already exists; STOP' }
+New-Item -ItemType Directory -Force .runtime/kubeconfig | Out-Null
+```
 
-```bash
+**STOP** if `trafficfuse-lab` already exists, tooling is unavailable, any check
+fails, inputs drift, or written approval is missing. Never adopt an existing
+cluster. `kind get clusters` lists names only; it does not access foreign APIs.
+
+## 2. Docker image build
+
+```powershell
 docker build --pull -f deploy/lab/Dockerfile -t trafficfuse-lab-service:phase1a .
-docker build --check -f deploy/lab/Dockerfile .        # no warnings
+Assert-NativeSuccess
+docker build --check -f deploy/lab/Dockerfile .
+Assert-NativeSuccess
 ```
 
-The base image is digest-pinned and all dependency pins mirror `uv.lock`
-(verified by `tests/test_lab_manifests.py`). The Agentic Intent Gate is **not**
-installed in the image. If the build fails, Phase 1B stops here with
-`DOCKER_BUILD_STATUS=FAILED`; the image is never built from an unpinned base or
-with extra packages to "make it work". A locally mutating step with an
-ambiguous outcome (interrupted build) is re-run only after human review —
-never automatically.
+The base digest and dependencies are pinned; AIG is excluded from the lab image.
+Record actual build output and image identity. **STOP** on failure; report
+`DOCKER_BUILD_STATUS=FAILED`. An ambiguous mutation requires human review before
+any repeat. Do not alter pins to get a build through.
 
-> **STOP** — build success is recorded verbatim; a failed build ends the phase.
+## 3. Cluster creation
 
----
-
-## Stage B — Cluster creation (future authorization only)
-
-```bash
+```powershell
 kind create cluster --name trafficfuse-lab --kubeconfig .runtime/kubeconfig/trafficfuse-lab.yaml
+Assert-NativeSuccess
 ```
 
-This single command creates the cluster **and** installs the dedicated
-kubeconfig (its `current-context` is `kind-trafficfuse-lab`; the API server is
-a local `127.0.0.1` endpoint). The ambient kubeconfig is untouched.
+Kind writes only the dedicated kubeconfig. Its context and cluster entry are
+`kind-trafficfuse-lab`; the parser returns the logical cluster `trafficfuse-lab`.
+The earlier logical-name cluster entry is also accepted only for this exact lab.
+**STOP** if creation fails or its outcome is ambiguous. Do not retry or adopt.
 
-### Record initial creation-time identity
+## 4. Capture actual identity and generate the creation record
 
-Independently inspect the newly created cluster with explicitly scoped,
-read-only commands:
-
-```bash
-kubectl $KC get nodes -o json
+```powershell
+uv run python -m trafficfuse.lab.lifecycle_cli record-creation --kubeconfig .runtime/kubeconfig/trafficfuse-lab.yaml --receipt .runtime/state/cluster-trafficfuse-lab.json --authorized
+Assert-NativeSuccess
 ```
 
-Extract the non-sensitive identity fields from the dedicated kubeconfig with
-the **trusted local parser** (prints only the endpoint and the CA fingerprint —
-never the raw file, never client key material):
+`--authorized` attests the operator's already granted creation-workflow approval;
+it cannot establish permission by itself. Use this only immediately after the
+approved successful creation in step 3. It does not establish whether an existing
+cluster was created by TrafficFuse; the operator must not use it for adoption.
+The command validates the dedicated kubeconfig locally, reads nodes with exact
+kubeconfig/context flags, then inspects only the expected Docker node's name and
+Kind cluster/role labels. It requires exactly `trafficfuse-lab-control-plane` and
+its actual `metadata.creationTimestamp`. It creates `.runtime/state/` before an
+exclusive write, flushes the record and reloads it through the real
+`load_ownership_receipt()` validator. Existing records are never overwritten.
 
-```bash
-uv run python -c "from trafficfuse.lab.lifecycle import canonical_kubeconfig_path, load_kubeconfig_document, verify_kubeconfig_document; i = verify_kubeconfig_document(load_kubeconfig_document(canonical_kubeconfig_path())); print(i.context, i.cluster); print(i.api_server); print(i.ca_fingerprint_sha256)"
-```
+Every required field is generated; **do not hand-fill identity values**:
 
-Then write the creation record `.runtime/state/cluster-trafficfuse-lab.json`
-(schema `trafficfuse-ownership-record-v2`) with exactly these fields:
-`cluster: "trafficfuse-lab"`, `context: "kind-trafficfuse-lab"`, `namespace:
-"trafficfuse-system"`, `api_server` (the local endpoint printed above),
-`ca_fingerprint_sha256` (the fingerprint printed above), `kind_node_names`
-(the exact node names, e.g. `["trafficfuse-lab-control-plane"]`), `created_at`
-(strict timezone-aware UTC ISO-8601, e.g. `2026-…Z` or `…+00:00`),
-`created_by: "trafficfuse"`, `kubeconfig:
-".runtime/kubeconfig/trafficfuse-lab.yaml"`. The record is **metadata**, not
-proof of ownership; Stage D supplies the proof.
+| Field | Value / source |
+| --- | --- |
+| `receipt_schema` | `"trafficfuse-ownership-record-v2"` |
+| `cluster` | `"trafficfuse-lab"` |
+| `context` | `"kind-trafficfuse-lab"` |
+| `namespace` | `"trafficfuse-system"` (intended bootstrap namespace) |
+| `api_server` | Actual local HTTPS endpoint from the dedicated file |
+| `ca_fingerprint_sha256` | SHA-256 of decoded CA data from that file |
+| `kind_node_names` | Actual scoped node observation, cross-checked with Docker |
+| `created_at` | Observed control-plane Node creation timestamp, UTC ISO-8601 |
+| `created_by` | `"trafficfuse"`, operator-attested workflow metadata |
+| `kubeconfig` | `".runtime/kubeconfig/trafficfuse-lab.yaml"` |
 
-**Refuse continuation on mismatched evidence:** if the independently inspected
-node names or identity fields do not match what was recorded, stop — do not
-edit the record to match; report the finding.
+This is **recorded metadata**, not independent proof that TrafficFuse created
+the cluster. Matching names, labels, a timestamp and `created_by` do not prove
+historical ownership. Step 7 must independently recollect and cross-check live
+facts after bootstrap. The generator does not bypass that collector or authorize
+destruction. No raw kubeconfig credentials are printed or archived.
 
-> **STOP** — the cluster exists and is recorded; nothing else has been created.
+**STOP** on missing/inconsistent identity, invalid schema/time, existing receipt
+or any collection failure. Never edit the record to match unexpected facts.
 
----
+## 5. Load the image into the new cluster
 
-## Stage C — Minimal namespace bootstrap (explicitly selected manifest only)
-
-```bash
+```powershell
 kind load docker-image trafficfuse-lab-service:phase1a --name trafficfuse-lab
-kubectl $KC apply -f deploy/lab/namespace.yaml
+Assert-NativeSuccess
 ```
 
-**Ordering rules:** the image loads **after** cluster creation and **before**
-any workload readies (Pods run with `imagePullPolicy: Never`). The namespace is
-bootstrapped with **only** `deploy/lab/namespace.yaml` — the whole
-`deploy/lab` kustomization is deliberately **not** applied here, because it
-also creates the Deployments and Services, which must not exist before
-ownership verification (Stage D). Only this explicitly authorized bootstrap
-step runs before full ownership verification.
+**STOP** on load failure. Pods use `imagePullPolicy: Never`; creation must precede
+loading, and loading must precede workloads.
 
-Verify the namespace ownership metadata (read-only):
+## 6. Namespace bootstrap
 
-```bash
-kubectl $KC get namespace trafficfuse-system -o json
+```powershell
+kubectl @KC apply -f deploy/lab/namespace.yaml
+Assert-NativeSuccess
+kubectl @KC get namespace trafficfuse-system -o json
+Assert-NativeSuccess
 ```
 
-The namespace must carry `trafficfuse.io/owner=trafficfuse-lab` and
-`app.kubernetes.io/managed-by=trafficfuse-lab`. If the labels are absent or
-wrong, stop — do not hand-edit the namespace; report the finding.
+Apply only this manifest. The Namespace must carry
+`trafficfuse.io/owner=trafficfuse-lab` and
+`app.kubernetes.io/managed-by=trafficfuse-lab`. No workloads exist yet.
+**STOP** if bootstrap fails or labels disagree; do not hand-edit labels.
 
-> **STOP** — `trafficfuse-system` exists with verified ownership labels; the
-> namespace-dependent verification can now run (no circular dependency).
+## 7. Live ownership verification
 
----
-
-## Stage D — Live ownership verification (trusted collector; read-only)
-
-```bash
+```powershell
 uv run python -m trafficfuse.lab.lifecycle_cli verify --kubeconfig .runtime/kubeconfig/trafficfuse-lab.yaml --receipt .runtime/state/cluster-trafficfuse-lab.json --collect
+Assert-NativeSuccess
 ```
 
-This is the single trusted verification operation: it verifies the dedicated
-kubeconfig document with the trusted local parser (exact context/cluster
-binding, local HTTPS API host only, CA-fingerprint anchor, no foreign
-contexts, no embedded credentials), loads and cross-checks the creation
-record, and then **performs the collection itself** through the read-only
-collector — `kubectl get nodes`, `kubectl get namespace trafficfuse-system`
-and `docker inspect` per recorded node, every command allowlisted and scoped
-to the dedicated kubeconfig and exact context. It compares actual facts with
-the creation-time records: API server, CA fingerprint, node identities,
-namespace identity and Docker node identity.
+The trusted host path performs its own read-only collection: scoped node and
+namespace reads plus Docker node inspection. It checks endpoint, CA fingerprint,
+exact node identities, namespace ownership labels and Docker identities against
+the record. Output contains minimal identity, checks and the command trace.
+`--facts` is inspection-only and is not used here.
 
-The printed output is redacted to the minimal identity information: expected
-context, cluster, API endpoint, CA fingerprint, per-check verification
-results, non-sensitive live facts and the exact executed command trace. No
-credential material is printed or archived; a failing command's output is
-stripped of credential-shaped material before it can reach a message.
+`CollectorExecution` is a **forgeable Python diagnostic marker**. Its nonce is
+not a signature; `is_collector_executed()` and the legacy `trusted` output field
+only indicate marker presence. Neither proves collection or grants authority.
+The boundary is controlled host execution of `verify_live_ownership()`, which
+accepts no facts parameter and invokes collection itself. Trusted host code and
+executors are assumed; this is not malicious-Python isolation. Deletion remains
+disabled even when all checks pass.
 
-Caller-supplied JSON (`--facts`) exists only for inspection, is marked
-untrusted, and is never sufficient proof for any destructive operation.
-Trust is established by **execution**, not by any provenance string.
+**STOP** on any refusal or missing check. Only a successful step 7 permits the
+already authorized deployment stage; a Python marker alone never permits it.
 
-Any refusal exits 2 with the failing check. **Stop immediately** — do not
-apply workloads against an unverified cluster, and do not retry mutations
-whose outcome is ambiguous.
+## 8. Application deployment
 
-> **STOP** — proceed to application deployment only on a verified, trusted
-> ownership outcome.
-
----
-
-## Stage E — Application deployment (explicitly selected manifests)
-
-```bash
-kubectl $KC -n trafficfuse-system apply -f deploy/lab/healthy-deployment.yaml
-kubectl $KC -n trafficfuse-system apply -f deploy/lab/faulty-deployment.yaml
-kubectl $KC -n trafficfuse-system apply -f deploy/lab/service-versions.yaml
-kubectl $KC -n trafficfuse-system apply -f deploy/lab/service-live.yaml
+```powershell
+kubectl @KC -n trafficfuse-system apply -f deploy/lab/healthy-deployment.yaml
+Assert-NativeSuccess
+kubectl @KC -n trafficfuse-system apply -f deploy/lab/faulty-deployment.yaml
+Assert-NativeSuccess
+kubectl @KC -n trafficfuse-system apply -f deploy/lab/service-versions.yaml
+Assert-NativeSuccess
+kubectl @KC -n trafficfuse-system apply -f deploy/lab/service-live.yaml
+Assert-NativeSuccess
 ```
 
-The namespace manifest is intentionally **not** repeated here (Stage C already
-applied and verified it), and the probe Job is applied only in Stage F. Each
-resource is selected explicitly — no whole-kustomization apply.
+**STOP** on failure or ambiguous outcome. No full kustomization apply is used.
 
-Wait for readiness:
+## 9. Wait for healthy/faulty readiness
 
-```bash
-kubectl $KC -n trafficfuse-system rollout status deployment/trafficfuse-healthy
-kubectl $KC -n trafficfuse-system rollout status deployment/trafficfuse-faulty
-kubectl $KC -n trafficfuse-system get pods -o wide
+```powershell
+kubectl @KC -n trafficfuse-system rollout status deployment/trafficfuse-healthy --timeout=180s
+Assert-NativeSuccess
+kubectl @KC -n trafficfuse-system rollout status deployment/trafficfuse-faulty --timeout=180s
+Assert-NativeSuccess
+kubectl @KC -n trafficfuse-system get pods -o wide
+Assert-NativeSuccess
 ```
 
-All Pods must be `Running` with `READY 1/1` before any probe. Record the exact
-Pod names and restart counts in the run report.
+Record Pod names and restarts. **STOP** if either deployment is unready.
+Readiness is not successful `/checkout` business-endpoint evidence.
 
-Confirm the live Service initially routes to the faulty version:
+## 10. Validate the live Service selector
 
-```bash
-kubectl $KC -n trafficfuse-system get service trafficfuse-live -o jsonpath='{.spec.selector}'
+```powershell
+$LiveServiceJson = kubectl @KC -n trafficfuse-system get service trafficfuse-live -o json
+Assert-NativeSuccess
+$LiveSelector = ($LiveServiceJson | ConvertFrom-Json).spec.selector
+if ($LiveSelector.app -ne 'trafficfuse' -or $LiveSelector.version -ne 'faulty' -or @($LiveSelector.PSObject.Properties).Count -ne 2) { throw 'Unexpected live selector; STOP' }
 ```
 
-Expected: `{"app":"trafficfuse","version":"faulty"}`. If it does not select
-`version=faulty`, stop — the degraded scenario depends on this selector, and
-changing it is a Phase 3 mutation that Phase 1B must not perform.
+**STOP** if routing differs. Keep the initial faulty selector unchanged; traffic
+switching belongs to a separately reviewed future phase.
 
-> **STOP** — workloads ready and routing confirmed; before any probe.
+## 11. Probe execution — healthy HTTP baseline
 
----
-
-## Stage F — Probe execution (evidence collection)
-
-```bash
-kubectl $KC -n trafficfuse-system apply -f deploy/lab/probe-job.yaml
-kubectl $KC -n trafficfuse-system wait --for=condition=complete job/trafficfuse-probe --timeout=300s
-kubectl $KC -n trafficfuse-system logs job/trafficfuse-probe
+```powershell
+kubectl @KC -n trafficfuse-system create -f deploy/lab/probe-healthy-job.yaml
+Assert-NativeSuccess
+kubectl @KC -n trafficfuse-system wait --for=condition=complete job/trafficfuse-probe-healthy --timeout=300s
+Assert-NativeSuccess
 ```
 
-The Job runs `trafficfuse.lab.probe_cli` against
-`http://trafficfuse-live.trafficfuse-system.svc.cluster.local/checkout` with
-`--scenario-id phase1b-live --target-label service:trafficfuse-live --requests 40
---concurrency 4 --timeout 5`, writing `/evidence/probe-live.json` in its emptyDir
-(ephemeral) **and** printing the complete evidence document to stdout between
-`TRAFFICFUSE_EVIDENCE_BEGIN` / `TRAFFICFUSE_EVIDENCE_END` markers. The marker
-block is the durable evidence channel. A failed Job exits non-zero — inspect
-`kubectl $KC -n trafficfuse-system describe job/trafficfuse-probe` and the Pod
-logs before any retry; never edit the Job to force success.
+The Job requests `/checkout` from `trafficfuse-healthy`, scenario
+`phase1b-healthy`, label `service:trafficfuse-healthy`, writing
+`/evidence/probe-healthy.json` plus stdout evidence markers. It performs 40 HTTP
+GET attempts with concurrency 4 and a five-second request timeout. Status codes
+and latency are measured per attempt. **STOP** unless the Job completed.
 
-> **STOP** — the Job must be complete before evidence export; an incomplete or
-> failed Job ends the evidence attempt with a report, not a retry loop.
+## 12. Probe execution — faulty live-Service scenario
 
----
-
-## Stage F — Evidence export and validation (byte-preserving)
-
-```bash
-kubectl $KC -n trafficfuse-system logs job/trafficfuse-probe 2>/dev/null | uv run python -m trafficfuse.lab.evidence_cli --logs - --run-id phase1b-live-001
+```powershell
+kubectl @KC -n trafficfuse-system create -f deploy/lab/probe-job.yaml
+Assert-NativeSuccess
+kubectl @KC -n trafficfuse-system wait --for=condition=complete job/trafficfuse-probe --timeout=300s
+Assert-NativeSuccess
 ```
 
-The exporter preserves the raw capture **byte-for-byte** before parsing,
-rejects non-UTF-8 or oversized captures (bounded), writes atomically, and
-stores under `artifacts/phase1b/phase1b-live-001/`: `probe-evidence.json`,
-`raw-probe-logs.txt` and `evidence-audit.json` (exact byte length, SHA-256,
-strict UTC timestamp, status). Raw logs are preserved **even when extraction
-or validation fails** — the audit file records the failing stage and stderr
-points at the preserved path. Exit codes: 0 success, 3 structural format
-problem, 4 strict validation failure. An existing run directory is never
-overwritten — use a new run id.
+This Job requests `/checkout` from `trafficfuse-live`, scenario `phase1b-live`,
+label `service:trafficfuse-live`, writing `/evidence/probe-live.json` plus stdout
+markers. Request count/concurrency/timeout match the baseline. Both Jobs disable
+automatic retry and service-account token mounting. They only perform HTTP GETs
+and write their evidence; they do not mutate application infrastructure. Job
+creation itself is an explicitly authorized lab-resource mutation. `create`
+refuses an existing Job; do not reuse old completed evidence or delete Jobs.
 
-Expected evidence properties for a 40-request run at the configured 50% fault
-rate: `total_requests=40`, `success_count=20`, `error_count=20`,
-`observed_error_percent=50.0`, sequences 1..40 each exactly once, every record a
-classified outcome, latency percentiles present, `synthetic_workload` declared,
-and timezone-aware UTC timestamps with `completed_at_utc >= started_at_utc`. The
-configured fault percentage itself never appears in the evidence.
+**STOP** on failure/incompletion. Inspect the exact Job with scoped read-only
+commands under the same approval; no automatic retry or forced success.
 
-Then produce the Phase 1B report: measured error rate and latency for the
-faulty live Service versus the healthy version Service on real probes, the
-exact fault distribution (Bresenham exactness), the environment facts
-(cluster, context, node, image digest/tag, commit), and the artifact paths with
-their audit SHA-256 values. Synthetic or estimated numbers are never presented
-as measurements (AGENTS.md).
+## 13. Evidence export and strict validation — both documents
 
-> **STOP** — evidence validated (or failure documented with preserved raw
-> logs); report written before preservation.
+```powershell
+New-Item -ItemType Directory $CaptureRoot | Out-Null
+kubectl @KC -n trafficfuse-system logs job/trafficfuse-probe-healthy > "$CaptureRoot/healthy.log"
+Assert-NativeSuccess
+kubectl @KC -n trafficfuse-system logs job/trafficfuse-probe > "$CaptureRoot/live.log"
+Assert-NativeSuccess
+uv run python -m trafficfuse.lab.evidence_cli --logs "$CaptureRoot/healthy.log" --run-id $HealthyRunId
+Assert-NativeSuccess
+uv run python -m trafficfuse.lab.evidence_cli --logs "$CaptureRoot/live.log" --run-id $LiveRunId
+Assert-NativeSuccess
+```
 
----
+The exporter strictly validates each marked document and preserves raw capture
+bytes before parsing. Distinct directories `artifacts/phase1b/<session>-healthy/`
+and `artifacts/phase1b/<session>-live/` each contain `probe-evidence.json`,
+`raw-probe-logs.txt`, and `evidence-audit.json` with byte counts, SHA-256 values,
+UTC time and final status. Existing directories cannot be overwritten. Exit 3
+means capture format failure; exit 4 means strict validation/export failure.
+Preserve partial logs and failure audits for review.
 
-## Preservation of resources for inspection (no deletion in Phase 1B)
+Configured 50% failure is a synthetic workload policy input, **not an observed
+result**. Do not require 20 successes/20 errors or substitute configured values
+for measurements. Real timeouts, transport errors and unexpected statuses must
+remain in the evidence. **STOP** unless both exports succeed and validate.
 
-Phase 1B ends with the cluster **running and preserved**:
+## 14. Produce the Phase 1B evidence report
 
-- the `trafficfuse-lab` cluster, the `trafficfuse-system` namespace, both
-  Deployments, all three Services and the completed probe Job stay in place
-  for inspection;
-- all evidence artifacts under `artifacts/phase1b/<run-id>/` stay in place
-  (git-ignored, operator-local), including raw logs and audit files;
-- the created resources (names, images, node, endpoints, selectors) are
-  documented in the Phase 1B report;
-- cleanup requirements are reported to the human operator.
+This offline summary consumes only the two validated exports. It checks their
+identities and audit hashes, and derives status distributions from request
+records. It never fabricates outcomes or latency.
 
-**No automatic cleanup follows the experiment.** Removing the cluster is
-outside the Phase 1B authorization scope and is **not** part of this runbook:
-cleanup requires a separate explicit human authorization, and the guarded
-`lifecycle` destruction path (dedicated kubeconfig, creation record, trusted
-live collection, ownership verification — with the collector performing the
-collection itself) remains the only supported route. Never issue ad-hoc
-removal commands against the cluster, its containers or its namespace.
+```powershell
+# BEGIN EVIDENCE SUMMARY
+$Summaries = foreach ($Scenario in @('healthy', 'live')) {
+    $RunId = if ($Scenario -eq 'healthy') { $HealthyRunId } else { $LiveRunId }
+    $Service = if ($Scenario -eq 'healthy') { 'trafficfuse-healthy' } else { 'trafficfuse-live' }
+    $Directory = "artifacts/phase1b/$RunId"
+    $EvidencePath = "$Directory/probe-evidence.json"
+    $RawPath = "$Directory/raw-probe-logs.txt"
+    $AuditPath = "$Directory/evidence-audit.json"
+    $Document = Get-Content -Raw $EvidencePath | ConvertFrom-Json
+    $Audit = Get-Content -Raw $AuditPath | ConvertFrom-Json
+    $EvidenceHash = (Get-FileHash $EvidencePath -Algorithm SHA256).Hash.ToLowerInvariant()
+    $RawHash = (Get-FileHash $RawPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($Audit.status -ne 'ok' -or $Audit.evidence.sha256 -ne $EvidenceHash -or $Audit.raw_logs.sha256 -ne $RawHash) { throw 'Evidence audit mismatch; STOP' }
+    if ($Document.scenario_id -ne "phase1b-$Scenario" -or $Document.target_label -ne "service:$Service" -or $Document.target_url -ne "http://$Service.trafficfuse-system.svc.cluster.local/checkout") { throw 'Scenario identity mismatch; STOP' }
+    $Distribution = @{}
+    $Document.records | Group-Object { if ($null -eq $_.status_code) { 'no_http_response' } else { [string]$_.status_code } } | ForEach-Object { $Distribution[$_.Name] = $_.Count }
+    [ordered]@{
+        scenario_id = $Document.scenario_id
+        target_url = $Document.target_url
+        total_requests = $Document.total_requests
+        success_count = $Document.success_count
+        error_count = $Document.error_count
+        observed_error_percent = $Document.observed_error_percent
+        status_code_distribution = $Distribution
+        latency_ms = $Document.latency_ms
+        synthetic_workload = $Document.synthetic_workload
+        evidence_path = $EvidencePath
+        evidence_sha256 = $EvidenceHash
+        raw_logs_path = $RawPath
+        raw_logs_sha256 = $RawHash
+        audit_path = $AuditPath
+    }
+}
+$ReportPath = "$CaptureRoot/phase1b-evidence-report.json"
+if (Test-Path $ReportPath) { throw 'Report exists; STOP, no overwrite' }
+$Summaries | ConvertTo-Json -Depth 12 | Set-Content -Encoding utf8NoBOM $ReportPath
+# END EVIDENCE SUMMARY
+Get-Content -Raw $ReportPath
+Get-FileHash $ReportPath -Algorithm SHA256
+```
 
-> **STOP** — end of the authorized Phase 1B sequence: resources preserved,
-> evidence archived, cleanup awaiting separate authorization.
+Attach the actual HEAD/working tree, local Docker/Kind versions, build output,
+image digest/tag, node/namespace/Pod identities, selector, ownership verification
+output, Job completion status and both evidence audits to the operator's report.
+All workload data is a synthetic lab experiment; in-process test evidence is
+never represented as in-cluster evidence. **STOP** on any report/hash mismatch.
 
----
+## 15. Preservation of resources for inspection
 
-## Corrections applied to the earlier Phase 1A.2 sequence
+Preserve `trafficfuse-lab`, the Namespace, both Deployments, all three Services,
+both completed Jobs, dedicated kubeconfig, creation record, captures and exports.
+Keep private files under gitignored `.runtime/` and `artifacts/`; do not publish
+credentials or private state. No automatic cleanup follows this experiment.
+Cluster deletion remains disabled in code and outside this runbook. Any future
+cleanup requires a separately reviewed workflow and **separate explicit human
+authorization**; neither an ownership record nor a collector marker grants it.
 
-| # | Earlier text | Correction |
-| --- | --- | --- |
-| 1 | Ownership verification (`verify --collect`) ran before the namespace existed | Namespace bootstrap (Stage C, `deploy/lab/namespace.yaml` only) precedes the namespace-dependent collector read (Stage D); no circular dependency with cluster creation |
-| 2 | `kind load docker-image …` effectively tied to pre-creation ordering | Image load is Stage C: after `kind create cluster`, before workload readiness (Pods use `imagePullPolicy: Never`) |
-| 3 | `kubectl … --context kind-trafficfuse-system` used a namespace as a context | Context is `kind-trafficfuse-lab`; namespace via `-n trafficfuse-system` |
-| 4 | Raw kubeconfig dump command used to read identity | Identity extraction via the trusted local parser (endpoint + CA fingerprint only); no credential-bearing output, redacted failure messages |
-| 5 | Runbook ended with a direct cluster-removal command | Deletion removed from the Phase 1B scope; preservation + separate cleanup authorization (guarded lifecycle path only) |
-| 6 | The whole-kustomization apply created Deployments/Services during bootstrap | Explicitly selected manifests per stage; namespace manifest alone in Stage C |
-| 7 | Caller-supplied facts JSON as ownership evidence | Trusted collector performs collection inside the verification operation; caller JSON is inspection-only and marked untrusted (no provenance string exists to spoof) |
+**STOP** — end of Phase 1B. Report observed results and remaining cleanup needs
+to the human operator; preserve everything for inspection.

@@ -45,13 +45,17 @@
 > execution: (1) the namespace/ownership-verification circular ordering — namespace bootstrap
 > now precedes the namespace-dependent collector read (Stages C→D); (2) direct cluster deletion
 > removed from the authorized Phase 1B sequence (preserve + separate cleanup authorization);
-> (3) spoofed collector provenance eliminated — trust is established by **execution**: facts
-> carry a private collector execution receipt minted only inside the collector, the destructive
-> gate performs the collection itself and accepts no caller facts, and the `source` string is
-> gone; (4) credential disclosure removed — kubeconfig identity comes from the trusted local
+> (3) the destructive gate performs collection itself and accepts no caller facts; the
+> `source` string is gone. The collector marker remains forgeable and provides no
+> cryptographic authenticity or authorization; (4) credential disclosure removed — kubeconfig identity comes from the trusted local
 > parser (endpoint + CA fingerprint only), outputs are redacted, and no raw kubeconfig view
 > command appears in the workflow. 327 offline tests green, 1 skipped. See
 > [docs/PHASE1B-ENTRY-REVIEW.md](docs/PHASE1B-ENTRY-REVIEW.md).
+>
+> **Phase 1B final hotfix:** validated post-creation record generation, separate healthy and
+> faulty HTTP scenarios, and a PowerShell 7.4+ operator sequence are prepared offline. Real
+> Docker build and Kubernetes execution remain **unverified; Phase 1B readiness is PARTIAL**.
+> See [docs/PHASE1B-FINAL-HOTFIX-REPORT.md](docs/PHASE1B-FINAL-HOTFIX-REPORT.md).
 
 ## What TrafficFuse AI is
 
@@ -142,7 +146,8 @@ Cluster execution (`trafficfuse-lab`), image build/load, and the future
 `reroute_service_traffic` tool are **not** executed in Phase 1A/1A.1/1A.2 and require
 explicit authorization (docs/PHASE1-PREFLIGHT.md, docs/PHASE1A-REPORT.md,
 docs/PHASE1A1-HARDENING-REPORT.md). The corrected operator sequence for Phase 1B
-(cluster creation → image load → record + trusted verification → workloads → probe →
+(image build → cluster creation → identity record → image load → Namespace →
+independent live verification → workloads → healthy + faulty probes →
 byte-preserving evidence export → preserved environment) is specified in
 [docs/PHASE1B-RUNBOOK.md](docs/PHASE1B-RUNBOOK.md).
 
@@ -200,7 +205,7 @@ trafficfuse-ai/
 - [docs/PHASE1B-ENTRY-REVIEW.md](docs/PHASE1B-ENTRY-REVIEW.md) — Phase 1B entry review: safe
   deployment gate (ordering, no deletion, execution-based trust, credential redaction)
 - [docs/PHASE1B-RUNBOOK.md](docs/PHASE1B-RUNBOOK.md) — corrected Phase 1B operator runbook
-  (Stages A–F, STOP conditions, preservation; no deletion)
+  (PowerShell 7.4+, 15 ordered steps, STOP conditions, preservation)
   (documentation only; every mutating step requires explicit approval)
 
 ## License

@@ -3,9 +3,8 @@
 Findings covered (no real cluster access anywhere in this file):
 
 * P2-a — spoofed collector provenance: ``source="collector"`` was a
-  caller-settable string. Trust is now established by execution: only facts
-  carrying a collector execution receipt are trusted, and the destructive
-  gate performs the collection itself.
+  caller-settable string. The receipt is also forgeable: controlled collection
+  inside the verification path is the boundary, and deletion stays disabled.
 * P2-b — Kubernetes credential disclosure: ``kubectl config view --raw``
   printed client key material. Identity now comes from the trusted local
   parser, outputs are redacted to the four identity fields, and command
@@ -26,6 +25,7 @@ import pytest
 from trafficfuse.lab import lifecycle
 from trafficfuse.lab.cluster_facts import (
     CommandResult,
+    CollectorExecution,
     LiveFacts,
     TrustedOwnership,
     is_collector_executed,
@@ -159,6 +159,36 @@ def _assert_no_secrets(text: str) -> None:
 
 
 # --- P2-a: spoofed provenance ------------------------------------------------------------------
+
+
+def test_manually_constructed_execution_marker_is_not_authority(repo_root, tmp_path):
+    kubeconfig = _write_kubeconfig(repo_root)
+    record_path = _write_record(tmp_path / "record.json")
+    forged = LiveFacts(
+        api_server=API_SERVER, ca_fingerprint_sha256=CA_FINGERPRINT,
+        node_names=NODES, namespace_labels=OWNED_LABELS,
+        docker_node_identities=NODES,
+        execution=CollectorExecution(nonce="forged", commands=(("not-executed",),)),
+    )
+    # This is deliberately reproducible: these are public, forgeable Python
+    # objects. The compatibility field is diagnostic, not authentication.
+    assert is_collector_executed(forged) is True
+    assert verify_ownership_evidence(json.loads(record_path.read_text()), forged).trusted is True
+    with pytest.raises(TypeError):
+        verify_live_ownership(kubeconfig_path=kubeconfig, record_path=record_path, facts=forged)
+    with pytest.raises(SafetyViolation, match="no collector execution"):
+        plan_cluster_destroy(kubeconfig_path=kubeconfig, receipt_path=record_path, authorized=True)
+    # Independent collection still happens and refuses a live read failure.
+    calls = []
+    def failing(argv):
+        calls.append(tuple(argv))
+        return CommandResult(tuple(argv), 1, b"", b"synthetic read failed")
+    with pytest.raises(SafetyViolation, match="collection failed"):
+        verify_live_ownership(kubeconfig_path=kubeconfig, record_path=record_path, executor=failing)
+    assert calls and calls[0][0] == "kubectl"
+    # Even successful controlled collection can never enable deletion.
+    with pytest.raises(SafetyViolation, match="remains disabled"):
+        plan_cluster_destroy(kubeconfig_path=kubeconfig, receipt_path=record_path, authorized=True, executor=_make_executor())
 
 
 def test_caller_cannot_set_a_collector_provenance_string() -> None:

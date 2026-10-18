@@ -52,6 +52,7 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 from urllib.parse import urlsplit
@@ -336,7 +337,10 @@ def verify_kubeconfig_document(
             )
     context_entry = _entry(contexts, expected_context, "context")
     context_body = context_entry.get("context") or {}
-    if context_body.get("cluster") != expected_cluster:
+    # Kind writes the kubeconfig entry as "kind-<name>". Retain support for
+    # the earlier logical-name fixtures, with both aliases pinned explicitly.
+    cluster_entry_name = context_body.get("cluster")
+    if cluster_entry_name not in (expected_cluster, f"kind-{expected_cluster}"):
         raise SafetyViolation(
             f"context {expected_context!r} points at cluster "
             f"{context_body.get('cluster')!r}, expected {expected_cluster!r}"
@@ -348,7 +352,7 @@ def verify_kubeconfig_document(
             "the dedicated file must not select another context"
         )
 
-    cluster_entry = _entry(document.get("clusters") or [], expected_cluster, "cluster")
+    cluster_entry = _entry(document.get("clusters") or [], cluster_entry_name, "cluster")
     cluster_body = cluster_entry.get("cluster") or {}
     server = cluster_body.get("server")
     if not isinstance(server, str):
@@ -403,8 +407,13 @@ def load_ownership_receipt(path: Path | str) -> dict[str, Any]:
         data = json.loads(receipt_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise SafetyViolation(f"unreadable ownership receipt {receipt_path}: {exc}") from exc
+    return validate_ownership_record(data)
+
+
+def validate_ownership_record(data: Any) -> dict[str, Any]:
+    """Validate creation metadata; this does not establish ownership or consent."""
     if not isinstance(data, dict):
-        raise SafetyViolation(f"ownership receipt {receipt_path} is not a JSON object")
+        raise SafetyViolation("ownership receipt is not a JSON object")
     if data.get("cluster") != CLUSTER_NAME or data.get("context") != EXPECTED_CONTEXT:
         raise SafetyViolation(
             "ownership receipt does not match the TrafficFuse cluster/context identity"
@@ -421,12 +430,37 @@ def load_ownership_receipt(path: Path | str) -> dict[str, Any]:
         raise SafetyViolation(
             f"ownership receipt is missing required fields: {', '.join(missing)}"
         )
-    _api_server_identity(str(data["api_server"]))
-    if not _SHA256_HEX.fullmatch(str(data["ca_fingerprint_sha256"])):
+    if not isinstance(data["api_server"], str):
+        raise SafetyViolation("ownership receipt api_server must be a string")
+    _api_server_identity(data["api_server"])
+    if not isinstance(data["ca_fingerprint_sha256"], str) or not _SHA256_HEX.fullmatch(
+        data["ca_fingerprint_sha256"]
+    ):
         raise SafetyViolation("ownership receipt ca_fingerprint_sha256 is not a SHA-256 hex digest")
     nodes = data["kind_node_names"]
     if not isinstance(nodes, list) or not nodes or not all(isinstance(n, str) for n in nodes):
         raise SafetyViolation("ownership receipt kind_node_names must be a non-empty list of names")
+    if len(set(nodes)) != len(nodes):
+        raise SafetyViolation("ownership receipt kind_node_names must be unique")
+    for node in nodes:
+        _check_dns1123(node, "ownership receipt node name")
+        if not node.startswith(f"{CLUSTER_NAME}-"):
+            raise SafetyViolation("ownership receipt kind_node_names contains a foreign node")
+    if not set(EXPECTED_NODE_NAMES).issubset(nodes):
+        raise SafetyViolation("ownership receipt kind_node_names lacks the expected control-plane")
+    timestamp = data["created_at"]
+    try:
+        if not isinstance(timestamp, str) or not re.fullmatch(
+            r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|\+00:00)", timestamp
+        ):
+            raise ValueError
+        created_at = datetime.fromisoformat(timestamp)
+        if created_at.utcoffset() != timedelta(0):
+            raise ValueError
+    except ValueError as exc:
+        raise SafetyViolation(
+            "ownership receipt created_at must be a timezone-aware UTC ISO-8601 timestamp"
+        ) from exc
     if data.get("created_by") != "trafficfuse":
         raise SafetyViolation("ownership receipt created_by must be 'trafficfuse'")
     if data.get("kubeconfig") != DEDICATED_KUBECONFIG:
@@ -442,11 +476,10 @@ class ClusterFacts:
 
     This module never queries a cluster itself: trusted facts are produced by
     ``trafficfuse.lab.cluster_facts`` (the read-only collector, executed by an
-    operator with explicit, context-pinned commands) and carry a private
-    ``CollectorExecution`` receipt; facts supplied by any other means (for
-    example a hand-written JSON file) are structurally **untrusted** — they
-    carry no receipt — and are never sufficient proof for destructive
-    operations. There is deliberately no provenance *string* on this type: a
+    operator with explicit, context-pinned commands). Collector markers are
+    forgeable Python objects, not proof of origin. Caller facts are never
+    accepted by the destruction path, which performs its own collection and
+    still refuses deletion. There is no provenance *string* on this type: a
     caller-controlled string is not a guarantee (Phase 1B entry review P2-a).
     Tests supply synthetic fixtures.
     """
@@ -492,12 +525,11 @@ def verify_ownership_evidence(
 
     Every trusted identity property must match exactly: API server, CA
     fingerprint, kind node identities and cluster ownership labels. Labels are
-    required but never sufficient on their own. ``trusted`` is True only when
-    the facts were produced by an actual collector execution (they carry the
-    private ``CollectorExecution`` receipt minted inside
-    ``cluster_facts.collect_live_facts``); caller-supplied facts can still be
-    *checked*, but they never authorize destruction. Trust by execution, not
-    by declaration — no string field is consulted.
+    required but never sufficient on their own. The legacy ``trusted`` field
+    reports only presence of a forgeable collector marker. It is diagnostic,
+    not authentication or authorization. Caller facts can be checked here;
+    the security boundary is ``verify_live_ownership`` collecting independently
+    inside trusted host control flow. Deletion remains disabled.
     """
     # Deferred import: cluster_facts imports this module; the trust helper
     # lives with the collector that defines the receipt type.
@@ -644,6 +676,8 @@ def build_preflight_plan(
     validate_namespace(namespace)
     steps = (
         f"kind create cluster --name {cluster} --kubeconfig {kubeconfig}",
+        "record actual post-creation identity with lifecycle_cli record-creation "
+        "(validated local metadata only; not ownership proof)",
         f"kind load docker-image trafficfuse-lab-service:phase1a --name {cluster}",
         f"kubectl --kubeconfig {kubeconfig} --context {context} apply "
         f"-f deploy/lab/namespace.yaml -n {namespace}",
@@ -658,7 +692,8 @@ def build_preflight_plan(
         f"-f deploy/lab/service-live.yaml -f deploy/lab/service-versions.yaml -n {namespace}",
         "wait for rollout readiness and confirm trafficfuse-live selects "
         "version=faulty before any probe",
-        "run the probe Job, wait for completion, export and validate evidence "
+        "run the healthy baseline probe Job, then the faulty live-Service "
+        "probe Job; wait for both, export and validate both evidence documents "
         "(raw logs preserved byte-for-byte)",
         "preserve the cluster for inspection: deletion is outside this plan "
         "and requires separate explicit human authorization",
