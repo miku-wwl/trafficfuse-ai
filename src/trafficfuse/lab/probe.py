@@ -15,6 +15,13 @@ configured fault distribution even when the Service load-balances across
 several faulty Pods. This is a measurement input, not a measured outcome: the
 observed error rate in the evidence is still computed solely from real
 responses.
+
+Routing evidence: when a response body reports the serving ``version`` /
+``pod`` (the lab workload does, for successes and synthetic failures alike),
+the record keeps them as ``served_version`` / ``served_pod``. Values are
+accepted only as short identifier strings; anything else is recorded as
+``null``. They describe what the responding process *reported*, observed per
+real request — never a configured or assumed routing.
 """
 
 from __future__ import annotations
@@ -22,6 +29,7 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+import re
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -39,6 +47,9 @@ EVIDENCE_SOURCE = "real_http_responses"
 # exact across multiple faulty Pods; an absent or invalid index simply
 # degrades the service to its per-process counter. See lab/fault.py.
 REQUEST_INDEX_HEADER_NAME = REQUEST_INDEX_HEADER
+
+_SERVED_VERSION = re.compile(r"^[a-z0-9][a-z0-9._-]{0,31}$")
+_SERVED_POD = re.compile(r"^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$")
 
 OUTCOME_SUCCESS = "success"
 OUTCOME_HTTP_ERROR = "http_error"
@@ -86,6 +97,8 @@ class ProbeRecord:
     status_code: int | None
     duration_ms: float
     detail: str = ""
+    served_version: str | None = None
+    served_pod: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -95,7 +108,20 @@ class ProbeRecord:
             "status_code": self.status_code,
             "duration_ms": self.duration_ms,
             "detail": self.detail,
+            "served_version": self.served_version,
+            "served_pod": self.served_pod,
         }
+
+
+def served_identity(body: Any) -> tuple[str | None, str | None]:
+    """Extract the self-reported serving version/pod from a decoded body."""
+    if not isinstance(body, dict):
+        return None, None
+    version, pod = body.get("version"), body.get("pod")
+    return (
+        version if isinstance(version, str) and _SERVED_VERSION.fullmatch(version) else None,
+        pod if isinstance(pod, str) and _SERVED_POD.fullmatch(pod) else None,
+    )
 
 
 @dataclass(frozen=True)
@@ -180,6 +206,12 @@ async def _single_request(
             str(exc),
         )
     duration_ms = (time.perf_counter() - start) * 1000
+    try:
+        body: Any = response.json()
+        body_error: ValueError | None = None
+    except ValueError as exc:
+        body, body_error = None, exc
+    version, pod = served_identity(body)
     if not 200 <= response.status_code < 400:
         return ProbeRecord(
             sequence,
@@ -188,21 +220,21 @@ async def _single_request(
             response.status_code,
             round(duration_ms, 3),
             f"HTTP {response.status_code}",
+            version,
+            pod,
         )
-    try:
-        response.json()
-    except ValueError as exc:  # malformed body from a supposedly healthy endpoint
+    if body_error is not None:  # malformed body from a supposedly healthy endpoint
         return ProbeRecord(
             sequence,
             config.target_url,
             OUTCOME_MALFORMED,
             response.status_code,
             round(duration_ms, 3),
-            f"response body is not valid JSON: {exc}",
+            f"response body is not valid JSON: {body_error}",
         )
     return ProbeRecord(
         sequence, config.target_url, OUTCOME_SUCCESS, response.status_code,
-        round(duration_ms, 3), "",
+        round(duration_ms, 3), "", version, pod,
     )
 
 

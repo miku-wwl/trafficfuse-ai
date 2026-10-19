@@ -1,5 +1,6 @@
-"""Domain model (deployments, services, incidents, plans, evidence).
+"""Domain model: evidence, diagnosis contract and recovery verification.
 
-Intentionally empty in Phase 0: domain types are introduced together with
-real evidence collection in Phase 1 (docs/PHASES.md).
+Pure, I/O-free types and rules: provenance-labelled hashed evidence
+(``evidence``), the model output contract and grounding validator
+(``diagnosis``), and the measured recovery verdict (``recovery``).
 """

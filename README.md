@@ -1,222 +1,125 @@
 # TrafficFuse AI
 
-**Evidence-Governed AI Release Circuit Breaker** — a consumer application for the
-**TechEx Amsterdam Hackathon 2026**.
+**The AI SRE that proves it fixed the incident.** · TechEx Amsterdam Hackathon 2026
 
-> **Status — Phase 0: PASS (local verification complete).** Repository foundation, the pinned
-> Agentic Intent Gate v0.2.0 dependency, lockfile, offline smoke tests and the FastAPI health
-> foundation are in place and verified. No AI diagnosis, Kubernetes execution, or dashboard
-> exists yet — see [docs/PHASES.md](docs/PHASES.md) for the roadmap and
-> [docs/PHASE0-REPORT.md](docs/PHASE0-REPORT.md) for verification evidence.
->
-> **Phase 0.1 — review fixes applied:** MIT `LICENSE`, automatic local `.env` loading with
-> process-environment precedence, and portable dependency-origin tests. See
-> [docs/PHASE0.1-REVIEW-FIXES.md](docs/PHASE0.1-REVIEW-FIXES.md).
->
-> **Phase 1A — offline failure lab implemented:** deterministic healthy/faulty workload, real-HTTP
-> probe with structured evidence, Kubernetes manifests for the future `trafficfuse-lab` cluster, and
-> safety-guarded (offline) lifecycle tooling — 83 offline tests green. No cluster has been created
-> or touched. See [docs/PHASE1A-REPORT.md](docs/PHASE1A-REPORT.md) and
-> [docs/PHASE1A-DESIGN.md](docs/PHASE1A-DESIGN.md).
->
-> **Phase 1A.1 — deployment readiness hardening: PASS.** Reproducible lab image definition
-> (`deploy/lab/Dockerfile`, pinned to `uv.lock`, non-root; offline build reported
-> BUILD_NOT_VERIFIED — no wheels staged, no network used), durable probe-evidence export
-> (stdout `TRAFFICFUSE_EVIDENCE_*` markers, strict validation, `artifacts/phase1b/<run-id>/`
-> collection), stronger Kubernetes ownership guards (kubeconfig document verification with a
-> CA-fingerprint anchor, v2 creation record, live-facts ownership verification, mandatory
-> negative tests), and an **exact** deterministic fault-rate algorithm (configured P% → exactly
-> P failures per 100 requests). 240 offline tests green; `AGENTS.md` and the pinned runtime
-> untouched. See [docs/PHASE1A1-HARDENING-REPORT.md](docs/PHASE1A1-HARDENING-REPORT.md).
->
-> **Phase 1A.2 — final preflight corrections: PASS.** Exact repository-owned kubeconfig path
-> enforcement (a foreign repository with an identical layout is refused), a **trusted
-> read-only live-facts collector** whose commands are allowlisted, explicitly scoped and
-> fail-closed — caller-supplied facts are never sole proof of ownership, strict
-> timezone-aware (UTC) evidence timestamps, and byte-for-byte raw-log preservation (bounded,
-> atomic writes, audit metadata, raw logs preserved on parse failure). The Phase 1B operator
-> runbook ordering is corrected (the image loads **after** cluster creation; the context is
-> `kind-trafficfuse-lab`, never the namespace). 295 offline tests green, 1 skipped;
-> `AGENTS.md` and the pinned runtime untouched. See
-> [docs/PHASE1A2-FINAL-PREFLIGHT-REPORT.md](docs/PHASE1A2-FINAL-PREFLIGHT-REPORT.md) and
-> [docs/PHASE1B-RUNBOOK.md](docs/PHASE1B-RUNBOOK.md).
->
-> **Phase 1B entry review — safe deployment gate: PASS.** Four findings corrected before any
-> execution: (1) the namespace/ownership-verification circular ordering — namespace bootstrap
-> now precedes the namespace-dependent collector read (Stages C→D); (2) direct cluster deletion
-> removed from the authorized Phase 1B sequence (preserve + separate cleanup authorization);
-> (3) the destructive gate performs collection itself and accepts no caller facts; the
-> `source` string is gone. The collector marker remains forgeable and provides no
-> cryptographic authenticity or authorization; (4) credential disclosure removed — kubeconfig identity comes from the trusted local
-> parser (endpoint + CA fingerprint only), outputs are redacted, and no raw kubeconfig view
-> command appears in the workflow. 327 offline tests green, 1 skipped. See
-> [docs/PHASE1B-ENTRY-REVIEW.md](docs/PHASE1B-ENTRY-REVIEW.md).
->
-> **Phase 1B final hotfix:** validated post-creation record generation, separate healthy and
-> faulty HTTP scenarios, and a PowerShell 7.4+ operator sequence are prepared offline. Real
-> Docker build and Kubernetes execution remain **unverified; Phase 1B readiness is PARTIAL**.
-> See [docs/PHASE1B-FINAL-HOTFIX-REPORT.md](docs/PHASE1B-FINAL-HOTFIX-REPORT.md).
+![TrafficFuse command center after a governed live recovery](docs/assets/cover-1920x1080.png)
 
-## What TrafficFuse AI is
+When a Kubernetes release starts failing, most "AI agents" either only explain
+the incident or act with broad credentials and report success because an API
+returned 200. TrafficFuse lets AI act **only through enforceable governance**, and
+counts success **only when it is measured**.
 
-A new deployment starts failing: HTTP 500 rates spike, the blast radius is unclear, and a
-human is pressured into authorizing a risky manual traffic change. TrafficFuse AI turns that
-moment into a governed, evidence-backed decision:
+1. **Real evidence** — probes the customer-facing Service and the healthy version
+   with real HTTP requests in a Kind cluster; every request records which version
+   served it; every evidence item is provenance-labelled and SHA-256 audited.
+2. **Evidence-grounded AI** — a local model (`phi4-mini` via Ollama) explains the
+   incident, cites evidence ids, states its uncertainty and proposes one bounded
+   remediation. Invented evidence or self-granted authority is rejected.
+3. **Governed remediation** — [Agentic Intent Gate](https://github.com/miku-wwl/agentic-intent-gate)
+   validates the Plan; a human approves the *exact* Plan; a *separate* capability
+   authorizes one Action; a durable claim allows exactly one dispatch.
+4. **One guarded change** — the trusted executor switches the Service selector
+   `faulty → healthy` with UID / resourceVersion / selector preconditions checked
+   atomically by the Kubernetes API server, then writes a durable receipt.
+5. **Proof of recovery** — TrafficFuse re-probes the same Service and declares
+   recovery only from the measurements.
 
-1. Real evidence is collected (HTTP probes, deployment metadata, Kubernetes state).
-2. An AI model reasons over the evidence and proposes a bounded remediation Plan.
-3. **Agentic Intent Gate** validates and persists the Plan.
-4. A human approves the *exact* Plan.
-5. A **separate** authorization permits exactly one Action.
-6. A trusted executor performs one controlled Kubernetes traffic-switch.
-7. TrafficFuse independently verifies service health and presents before/after evidence.
+## Verified live result (19 Oct 2026, local Kind lab, synthetic workload)
 
-A recorded Action success is never mistaken for proof of service recovery — the application
-verifies health independently.
+| | Before | After |
+| --- | --- | --- |
+| Live error rate (40 real requests) | **50.0%** (HTTP 500 × 20) | **0.0%** |
+| Served by | `faulty` × 40 | `healthy` × 40 |
+| Selector | `version=faulty` (rv 635) | `version=healthy` (rv 25444) |
+| Governance | Run `Approved` → Action `Authorized` | Action `Succeeded`, receipt `36e933bc…` |
 
-## Safety model (summary)
+Approval → proven recovery: **33 s**. Four unsafe proposals (foreign target,
+reversed direction, self-granted kubeconfig/scope/budget, smuggled delete step)
+were refused by the gate. Full evidence: [docs/AWARD-SPRINT-REPORT.md](docs/AWARD-SPRINT-REPORT.md).
 
-- Only disposable, explicitly approved local **Kind** environments may ever be mutated;
-  production Kubernetes clusters are strictly out of scope.
-- Human **Plan Approval** and **Action Authorization** are distinct gates; approval alone
-  never dispatches an effect.
-- The AI proposes Plans; it never selects credentials, execution identities, scopes,
-  budgets, or grant decisions.
-- Ambiguous post-dispatch outcomes are terminal `Unknown` — no automatic retry, no replay.
-- Synthetic or simulated metrics are always labeled and never presented as real production
-  evidence.
-- The shared runtime is **reused as a pinned installed dependency**, never copied, forked,
-  monkeypatched, or re-implemented.
+## How it works
 
-The binding rules live in [AGENTS.md](AGENTS.md) (upstream runtime rules plus a
-TrafficFuse-specific section) and govern all development.
-
-## Architecture at a glance
+```mermaid
+flowchart LR
+  P[Probe Jobs<br/>real HTTP] --> E[Evidence bundle<br/>EV-1..n, SHA-256]
+  E --> M[phi4-mini<br/>local diagnosis]
+  M --> G[Grounding validator]
+  G --> V[AIG: validate + persist Plan]
+  V --> A[Human approves exact Plan]
+  A --> Z[Separate capability<br/>authorizes one Action]
+  Z --> C[Durable claim]
+  C --> X[Reroute executor<br/>guarded JSON patch]
+  X --> R[Durable receipt]
+  R --> Q[Re-probe same Service]
+  Q --> D{Recovered?}
+```
 
 | Concern | Owner |
 | --- | --- |
-| Evidence collection, HTTP probes, Kubernetes inspection | TrafficFuse AI |
-| Deployment/service health analysis, incident reasoning, consumer `ModelProvider` | TrafficFuse AI |
-| Trusted Kubernetes executor (`reroute_service_traffic`), target allowlists, preconditions | TrafficFuse AI |
-| Independent post-action verification, incident UI and reporting | TrafficFuse AI |
-| Plan validation, persistent Runs, exact Plan-Approval binding, Action admission | Agentic Intent Gate |
-| Independent Authorization, durable Action claim, Action Ledger, idempotency, fail-closed outcomes | Agentic Intent Gate |
+| Evidence, probes, Kubernetes inspection, AI diagnosis, grounding, executor, receipts, recovery proof, API, dashboard | **TrafficFuse** (this repository) |
+| Plan validation, persistent Runs, exact Plan-Approval binding, admission, independent Authorization, durable claim, Action ledger, idempotency, fail-closed `Unknown` | **Agentic Intent Gate v0.2.0** — pinned, installed, unmodified |
 
-Full detail: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+Architecture details: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
-## Quick start
+## Run it
 
-Requires Python 3.13 and [`uv`](https://docs.astral.sh/uv/).
+Requires Python 3.13, [`uv`](https://docs.astral.sh/uv/), and for the dashboard
+build Node 18+. Local diagnosis needs [Ollama](https://ollama.com) with `phi4-mini`.
 
 ```bash
-git clone git@github.com:miku-wwl/trafficfuse-ai.git
-cd trafficfuse-ai
-cp .env.example .env        # optional; .env is git-ignored. It is loaded automatically,
-                           # and explicit process environment variables always win.
-uv sync                     # resolves uv.lock, installs the pinned runtime + dev tools
-uv run pytest               # offline smoke tests: pinned dependency, public API, health endpoint
-uv run uvicorn trafficfuse.api.app:app --reload
-curl http://127.0.0.1:8000/health
+uv sync
+cd dashboard && npm ci && npm run build && cd ..      # builds the dashboard served at /
+uv run pytest -q                                      # 554 offline tests
 ```
 
-## Failure lab (offline — Phase 1A / 1A.1)
+| Mode | Start | Purpose |
+| --- | --- | --- |
+| `simulation` (default) | `uv run uvicorn trafficfuse.api.app:app --port 8000` | Offline: in-process lab services, **no Kubernetes**; real gate, probes, receipts and model. Labelled everywhere. |
+| `live` | `TRAFFICFUSE_MODE=live …` | The approved disposable `trafficfuse-lab` Kind cluster only. Setup and demo steps: [docs/LIVE-DEMO-RUNBOOK.md](docs/LIVE-DEMO-RUNBOOK.md). |
+| `replay` | `TRAFFICFUSE_MODE=replay …` | Read-only recorded live incident ([demo/replay](demo/replay/recorded-incident.json)); every write returns 403. |
 
-The synthetic workload, real-HTTP probe, and guarded lifecycle planner run without any cluster:
+Open <http://127.0.0.1:8000>. The operator CLI (`python -m trafficfuse.cli`)
+provisions profiles, authorizes/executes as a separate capability holder, and
+exports recorded incidents.
 
-```bash
-uv run python -m trafficfuse.lab.service                                   # healthy workload on :8080
-TRAFFICFUSE_LAB_MODE=faulty TRAFFICFUSE_LAB_FAULT_RATE_PERCENT=75 \
-    uv run python -m trafficfuse.lab.service                               # exactly 75% deterministic 500s
-uv run python -m trafficfuse.lab.lifecycle_cli preflight \
-    --kubeconfig .runtime/kubeconfig/trafficfuse-lab.yaml                  # non-mutating Phase 1B plan
-uv run python -m trafficfuse.lab.lifecycle_cli verify \
-    --kubeconfig .runtime/kubeconfig/trafficfuse-lab.yaml \
-    --receipt .runtime/state/cluster-trafficfuse-lab.json --collect  # trusted read-only ownership check
-# --facts <file> is an untrusted, inspection-only alternative: never sufficient
-# proof for a destructive operation.
-```
+## Safety model
 
-The lab image is defined by `deploy/lab/Dockerfile` (build context: repository root):
+- **Model output proposes; it never selects** credentials, executors, bindings,
+  scopes, budgets or grants. Unknown fields in model output are rejected.
+- **Approval ≠ Authorization.** Approving dispatches nothing; authorizing
+  dispatches nothing; only a durably claimed, authorized Action runs — once.
+- **Fail closed.** Ambiguous post-dispatch outcomes are terminal `Unknown`; no
+  retry, replay or reconciliation. Stale targets and stale evidence are refused
+  before dispatch.
+- **A privileged API that stays local.** Mutations only from loopback, only with the
+  `X-TrafficFuse-Client` header (cross-site forgery needs a CORS preflight that is never
+  granted), Host allowlist against DNS rebinding, and nothing mutating in replay mode.
+- **Only the disposable local lab.** Dedicated kubeconfig, exact context and
+  namespace, exact kubectl command shapes, ownership re-verified before execution;
+  production and foreign clusters are out of scope by construction.
+- **Labels never lie.** Live, simulation, replay and test-fixture data are labelled
+  on every panel; the lab workload is declared synthetic.
 
-```bash
-docker build --pull -f deploy/lab/Dockerfile -t trafficfuse-lab-service:phase1a .   # Phase 1B (network required)
-```
-
-Cluster execution (`trafficfuse-lab`), image build/load, and the future
-`reroute_service_traffic` tool are **not** executed in Phase 1A/1A.1/1A.2 and require
-explicit authorization (docs/PHASE1-PREFLIGHT.md, docs/PHASE1A-REPORT.md,
-docs/PHASE1A1-HARDENING-REPORT.md). The corrected operator sequence for Phase 1B
-(image build → cluster creation → identity record → image load → Namespace →
-independent live verification → workloads → healthy + faulty probes →
-byte-preserving evidence export → preserved environment) is specified in
-[docs/PHASE1B-RUNBOOK.md](docs/PHASE1B-RUNBOOK.md).
-
-## Repository layout
-
-```text
-trafficfuse-ai/
-├── AGENTS.md                 # binding agent rules (upstream + TrafficFuse-specific section)
-├── README.md
-├── pyproject.toml            # dependencies incl. the pinned shared runtime (immutable commit)
-├── uv.lock                   # reproducible lockfile (verified by uv sync --locked)
-├── .env.example              # environment template — no secrets
-├── .gitignore                # runtime data, kubeconfigs, credentials, Python/Node artifacts
-├── src/trafficfuse/
-│   ├── api/                  # FastAPI application (health endpoint in Phase 0)
-│   ├── application/          # orchestration services — Phase 2/3, intentionally empty
-│   ├── domain/               # domain model — Phase 1, intentionally empty
-│   ├── infrastructure/       # external integrations: pinned runtime surface (Phase 0)
-│   ├── config/               # environment-based settings, no secrets in source
-│   └── lab/                  # Phase 1A: synthetic workload, fault policy, probe, lifecycle guards
-├── deploy/lab/               # Kubernetes manifests + Dockerfile for the future trafficfuse-lab cluster (Phase 1B)
-├── tests/                    # offline tests (dependency, API, lab service, fault matrix, probe, evidence, manifests, guards)
-└── docs/
-    ├── PRODUCT-BRIEF.md
-    ├── ARCHITECTURE.md
-    ├── COMPETITION.md
-    ├── PHASES.md
-    ├── PHASE0-REPORT.md
-    ├── PHASE0.1-REVIEW-FIXES.md
-    ├── PHASE1A-DESIGN.md
-    ├── PHASE1A-REPORT.md
-    ├── PHASE1A1-HARDENING-REPORT.md
-    ├── PHASE1A2-FINAL-PREFLIGHT-REPORT.md
-    ├── PHASE1B-ENTRY-REVIEW.md
-    ├── PHASE1B-RUNBOOK.md
-    └── PHASE1-PREFLIGHT.md
-```
+Binding rules: [AGENTS.md](AGENTS.md).
 
 ## Documentation
 
-- [docs/PRODUCT-BRIEF.md](docs/PRODUCT-BRIEF.md) — users, problem, differentiation, success criteria
-- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — components, trust boundaries, execution design
-- [docs/COMPETITION.md](docs/COMPETITION.md) — verified official requirements, unknowns, disclosures
-- [docs/PHASES.md](docs/PHASES.md) — roadmap and acceptance gates
-- [docs/PHASE0-REPORT.md](docs/PHASE0-REPORT.md) — executed verification evidence
-- [docs/PHASE0.1-REVIEW-FIXES.md](docs/PHASE0.1-REVIEW-FIXES.md) — review fixes and git reconciliation
-- [docs/PHASE1-PREFLIGHT.md](docs/PHASE1-PREFLIGHT.md) — read-only environment findings, cluster design
-- [docs/PHASE1A-DESIGN.md](docs/PHASE1A-DESIGN.md) — failure-lab design and topology
-- [docs/PHASE1A-REPORT.md](docs/PHASE1A-REPORT.md) — Phase 1A implementation evidence
-- [docs/PHASE1A1-HARDENING-REPORT.md](docs/PHASE1A1-HARDENING-REPORT.md) — Phase 1A.1 review-fix
-  evidence: image, evidence export, ownership guards, fault-rate matrix, Phase 1B workflow
-- [docs/PHASE1A2-FINAL-PREFLIGHT-REPORT.md](docs/PHASE1A2-FINAL-PREFLIGHT-REPORT.md) — Phase 1A.2
-  final preflight corrections: exact kubeconfig ownership, trusted live-facts collector,
-  strict UTC timestamps, byte-preserving raw logs
-- [docs/PHASE1B-ENTRY-REVIEW.md](docs/PHASE1B-ENTRY-REVIEW.md) — Phase 1B entry review: safe
-  deployment gate (ordering, no deletion, execution-based trust, credential redaction)
-- [docs/PHASE1B-RUNBOOK.md](docs/PHASE1B-RUNBOOK.md) — corrected Phase 1B operator runbook
-  (PowerShell 7.4+, 15 ordered steps, STOP conditions, preservation)
-  (documentation only; every mutating step requires explicit approval)
+- [docs/PITCH.md](docs/PITCH.md) — submission copy, business value, differentiation, slides, diagram spec
+- [docs/DEMO-SCRIPT.md](docs/DEMO-SCRIPT.md) — 3-minute storyboard
+- [docs/LIVE-DEMO-RUNBOOK.md](docs/LIVE-DEMO-RUNBOOK.md) — run, demo, reset, troubleshoot
+- [docs/AWARD-SPRINT-REPORT.md](docs/AWARD-SPRINT-REPORT.md) — what was built and verified
+- [docs/SUBMISSION-READINESS.md](docs/SUBMISSION-READINESS.md) — submission checklist
+- [docs/CLAUDE-HANDOVER-REPORT.md](docs/CLAUDE-HANDOVER-REPORT.md) — handover assessment and decisions
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/PRODUCT-BRIEF.md](docs/PRODUCT-BRIEF.md),
+  [docs/COMPETITION.md](docs/COMPETITION.md), [docs/PHASES.md](docs/PHASES.md) (phase history and earlier reports)
 
-## License
+## Reuse disclosure and license
 
-TrafficFuse AI is released under the **MIT License** — see [LICENSE](LICENSE).
-External dependencies retain their own licenses; in particular the shared runtime
-**Agentic Intent Gate** (<https://github.com/miku-wwl/agentic-intent-gate>) is a
-separate MIT-licensed project consumed as a pinned external dependency.
+TrafficFuse consumes **Agentic Intent Gate v0.2.0**
+(<https://github.com/miku-wwl/agentic-intent-gate>, MIT), a pre-existing runtime by the
+same author, as a pinned installed dependency (commit
+`7261fdd2f47d2b15fabe8faac527eeee37338eb1`). All TrafficFuse-specific code was written
+for this hackathon.
 
-## Scope boundaries
-
-- This is a hackathon prototype, not production software.
-- Production Kubernetes clusters are never accessed or mutated.
-- No commit, push, release, or deployment happens without explicit authorization.
+TrafficFuse AI is released under the **MIT License** — see [LICENSE](LICENSE). This is
+a hackathon prototype, not production software.

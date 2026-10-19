@@ -26,6 +26,13 @@
   - Application URL
 - Submission guidance reference: https://lablab.ai/delivering-your-hackathon-solution
 
+## Re-check 2026-10-19
+
+The official page was fetched again on 2026-10-19 (the last online build day). The
+schedule still reads **"To be announced"**: no submission date, hour or timezone, and no
+confirmed sponsor tracks. Confirm the cut-off in the authenticated lablab.ai portal.
+Submission status and checklist: [SUBMISSION-READINESS.md](SUBMISSION-READINESS.md).
+
 ## Unknown / pending requirements
 
 - **Final submission deadline timestamp:** the page publishes the event window
@@ -54,11 +61,11 @@
 
 - [x] Public GitHub repository exists: `miku-wwl/trafficfuse-ai` (kept free of secrets,
       kubeconfigs, runtime databases)
-- [ ] Cover image
+- [x] Cover image candidate (`docs/assets/cover-1920x1080.png`, owner to approve)
 - [ ] Video presentation (Phase 5)
 - [ ] Slide presentation (Phase 5)
 - [ ] Demo application platform / application URL (Phase 4–5)
-- [ ] Project title / descriptions / category tags (Phase 5)
+- [x] Project title / descriptions / category tags drafted (docs/PITCH.md)
 - [ ] Re-verify official submission deadline and guidelines before submitting
 
 ## Compliance risks

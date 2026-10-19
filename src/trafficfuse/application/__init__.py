@@ -1,6 +1,7 @@
 """Application services (incident orchestration).
 
-Intentionally empty in Phase 0: evidence pipelines, AI diagnosis and the
-governed Plan -> Approval -> Authorization -> Action workflow are Phase 2-3
-work (docs/PHASES.md). No placeholder orchestration is provided.
+``evidence_collection`` builds labelled evidence bundles and the degradation
+policy; ``incidents`` drives detection -> diagnosis -> governed action ->
+verification through the Agentic Intent Gate public runtime; ``store`` keeps
+incidents and the append-only audit timeline.
 """

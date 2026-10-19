@@ -4,13 +4,13 @@
 
 ```text
                       ┌────────────────────────────────────────────┐
-                      │               (future) Dashboard           │
-                      │        React + TypeScript (Phase 4)         │
+                      │          Dashboard (dashboard/)            │
+                      │        React + TypeScript + Vite           │
                       └───────────────────▲────────────────────────┘
                                           │ HTTP (untrusted input)
                       ┌───────────────────┴────────────────────────┐
                       │        src/trafficfuse/api (FastAPI)       │
-                      │        health (Phase 0) → incident APIs    │
+                      │   incident API · mutation boundary · CLI   │
                       └───────────────────▲────────────────────────┘
                                           │
         ┌─────────────────────────────────┼──────────────────────────────────┐
@@ -72,14 +72,22 @@ TrafficFuse consumes the pinned installed distribution `agentic-intent-gate==0.2
 - **Bundled demo tooling** of the shared runtime (`service-demo` prompt, browser admission
   UI) is demo-specific and is not reused; TrafficFuse provides its own provider and admission path.
 
-## Planned single-tool execution workflow (Phase 3)
+## Single-tool execution workflow (implemented, verified live 2026-10-19)
 
 ```text
-evidence → Provider proposes Plan → AIG validates + persists Run
-   → human approves the exact Plan → Action admission
-   → independent Authorization → durable Action claim
-   → reroute_service_traffic executor dispatch (5s default budget starts after claim)
-   → durable receipt → TrafficFuse independent health verification
+probe Jobs (live + healthy baseline) → evidence bundle (EV-n, SHA-256)
+   → local model diagnosis → grounding validator → Plan composed
+     (model: goal/target/service/namespace/versions; host: cluster, UID,
+      resourceVersion, evidence digest)
+   → StagedProposalProvider → AIG validates + persists Run (AwaitingApproval)
+   → human approves the exact Plan (fingerprint-bound)
+   → capability holder: Action admission + independent Authorization
+   → trusted ownership re-verification → durable Action claim
+   → RerouteExecutor (5 s budget after claim): identity + inputs, evidence anchor
+     (source, preconditions, justification, ≤30 min freshness), live pre-read,
+     durable dispatch fence, ONE JSON patch with test ops, independent re-read,
+     durable receipt
+   → TrafficFuse re-probes the same Service → RECOVERED / NOT_RECOVERED / INCONCLUSIVE
 ```
 
 - One explicitly registered trusted `SIDE_EFFECT` tool per Runtime composition:
@@ -112,12 +120,36 @@ evidence → Provider proposes Plan → AIG validates + persists Run
 - **AIG Action success evidence ≠ application-level service recovery.** Recovery is proven
   only by TrafficFuse's independent verification.
 
-## Phase 0 implementation state
+## Implementation state (2026-10-19)
 
-Implemented: FastAPI health endpoint; pinned runtime integration surface
-(`src/trafficfuse/infrastructure/runtime.py`: pins, version/commit verification, public API
-import, budget introspection); environment-based settings.
+| Layer | Modules |
+| --- | --- |
+| Domain | `domain/evidence.py` (labelled, hashed evidence), `domain/diagnosis.py` (prompt, output contract, grounding, Plan composition), `domain/recovery.py` (measured verdict) |
+| Infrastructure | `kube.py` (exact-shape kubectl gateway, probe template, `SelectorPatch`), `live_cluster.py`, `simulation.py` (labelled offline lab), `reroute.py` (tool contract, receipt store, executor, live port), `governance.py` (AIG composition per profile), `ollama.py`, `runtime.py` (pins) |
+| Application | `evidence_collection.py` (bundle + degradation policy + anchors), `incidents.py` (orchestration over the AIG public API, red-team scenarios), `store.py` (incidents + append-only events) |
+| API / UI | `api/app.py` (routes, loopback/replay mutation boundary), `api/composition.py` (live / simulation / replay), `cli.py`, `dashboard/` |
 
-Intentionally empty (`__init__.py` documentation only): `application/`, `domain/` — their
-contents belong to later phases. No placeholder logic pretends AI diagnosis or Kubernetes
-execution exists.
+### Governance profiles
+
+`.runtime/trafficfuse/<mode>/aig/` holds one private profile per mode:
+`identity.json` (retained `ToolBinding`: `reroute_service_traffic` / `1` /
+`trafficfuse-live` / adapter `kind-kubectl-reroute` or `offline-sim-reroute` /
+`reroute-v1` / fresh UUIDv4 scope), `capability` (operator secret), `gate.sqlite3`
+(AIG ledger) and `receipts.sqlite3` (consumer effect store). The live profile is
+provisioned explicitly by the operator; the simulation profile is created on first
+start because it cannot reach any infrastructure.
+
+### Trust boundaries (as implemented)
+
+- Model output and HTTP input are untrusted. The grounding validator rejects
+  unknown fields, invented evidence ids and unsupported actions; the gate's tool
+  schema and semantic rule decide every Plan argument.
+- Mutating HTTP routes are refused before routing for non-loopback clients, for
+  requests without the `X-TrafficFuse-Client` header (CSRF: the custom header forces a
+  CORS preflight that is never granted) and in replay mode. A trusted-Host allowlist
+  (`TRAFFICFUSE_ALLOWED_HOSTS`) defeats DNS rebinding. The execution capability arrives
+  per request and is never returned or stored by the server or the dashboard.
+- The governed patch exists only in the executor's live port; the API can read and
+  create probe Jobs but has no path to the Service mutation.
+- Live operations require the dedicated kubeconfig; ownership is re-verified by the
+  trusted collector before each execution.

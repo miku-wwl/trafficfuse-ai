@@ -130,3 +130,59 @@ def test_evidence_json_round_trip_and_integrity() -> None:
     assert set(payload["latency_ms"]) == {"min", "p50", "p95", "max", "mean"}
     # Re-serialising is stable (audit integrity).
     assert json.loads(evidence.to_json()) == payload
+
+
+# --- routing evidence (served version / pod) ----------------------------------
+
+
+def test_probe_records_serving_version_and_pod_for_success_and_failure() -> None:
+    app = create_lab_app(
+        mode=MODE_FAULTY, fault_rate_percent=50, pod_name="trafficfuse-faulty-abc12-x9z8q"
+    )
+    evidence = asyncio.run(run_probe(_config(total_requests=10), transport=_transport(app)))
+    outcomes = {record.outcome for record in evidence.records}
+    assert outcomes == {OUTCOME_SUCCESS, OUTCOME_HTTP_ERROR}
+    # Both synthetic successes and synthetic 500s report who served them.
+    assert {record.served_version for record in evidence.records} == {"faulty"}
+    assert {record.served_pod for record in evidence.records} == {"trafficfuse-faulty-abc12-x9z8q"}
+    payload = evidence.to_dict()
+    assert payload["records"][0]["served_version"] == "faulty"
+
+
+def test_probe_offline_pod_identity_is_null_not_hostname() -> None:
+    evidence = asyncio.run(
+        run_probe(_config(total_requests=3), transport=_transport(create_lab_app()))
+    )
+    assert {record.served_version for record in evidence.records} == {"healthy"}
+    assert {record.served_pod for record in evidence.records} == {None}
+
+
+def test_lab_app_rejects_non_dns_pod_name() -> None:
+    app = create_lab_app(pod_name="Bad Host/Name")
+    evidence = asyncio.run(run_probe(_config(total_requests=1), transport=_transport(app)))
+    assert evidence.records[0].served_pod is None
+
+
+def test_probe_ignores_untrusted_identity_shapes() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"version": "x" * 200, "pod": ["not", "a", "name"]})
+
+    evidence = asyncio.run(
+        run_probe(_config(total_requests=2), transport=httpx.MockTransport(handler))
+    )
+    assert {(r.served_version, r.served_pod) for r in evidence.records} == {(None, None)}
+
+
+def test_validator_accepts_identity_fields_and_rejects_bad_shapes() -> None:
+    from trafficfuse.lab.evidence import validate_evidence_document
+
+    app = create_lab_app(mode=MODE_HEALTHY, pod_name="trafficfuse-healthy-1")
+    document = asyncio.run(
+        run_probe(_config(total_requests=4), transport=_transport(app))
+    ).to_dict()
+    assert validate_evidence_document(document).valid
+    document["records"][0]["served_version"] = "Not Valid!"
+    document["records"][1]["served_pod"] = 7
+    errors = validate_evidence_document(document).errors
+    assert any("records[0].served_version" in error for error in errors)
+    assert any("records[1].served_pod" in error for error in errors)

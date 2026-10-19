@@ -126,13 +126,16 @@ def _facts(**overrides) -> ClusterFacts:
 # --- kubeconfig path refusals -------------------------------------------------------
 
 
-def test_missing_dedicated_kubeconfig_refused() -> None:
-    # The canonical repository-owned path is the only accepted shape. No
-    # cluster exists yet, so the file is absent: loading must refuse.
+def test_missing_dedicated_kubeconfig_refused(repo_root: Path) -> None:
+    # The canonical repository-owned path is the only accepted shape; when its
+    # file is absent, loading must refuse. Hermetic: the real workstation may
+    # now hold the approved lab's kubeconfig (created 2026-10-19), so the
+    # trusted root points at an empty synthetic repository instead.
     canonical = canonical_kubeconfig_path()
-    assert validate_kubeconfig_path(DEDICATED_KUBECONFIG) == canonical
+    assert canonical == (repo_root / DEDICATED_KUBECONFIG).resolve()
+    assert validate_kubeconfig_path(canonical) == canonical
     with pytest.raises(SafetyViolation, match="does not exist"):
-        load_kubeconfig_document(DEDICATED_KUBECONFIG)
+        load_kubeconfig_document(canonical)
 
 
 def test_unexpected_kubeconfig_path_refused(tmp_path: Path) -> None:

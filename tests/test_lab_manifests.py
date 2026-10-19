@@ -96,18 +96,42 @@ def test_deployments_have_sane_resources_and_probes() -> None:
             assert container["env"][0]["name"] == "TRAFFICFUSE_LAB_MODE"
 
 
+def _literal_env(deployment) -> dict:
+    return {
+        entry["name"]: entry["value"]
+        for entry in _containers(deployment)[0]["env"]
+        if "value" in entry
+    }
+
+
 def test_faulty_deployment_configures_deterministic_fault_rate() -> None:
     (deployment,) = _load("faulty-deployment.yaml")
-    env = {entry["name"]: entry["value"] for entry in _containers(deployment)[0]["env"]}
+    env = _literal_env(deployment)
     assert env["TRAFFICFUSE_LAB_MODE"] == "faulty"
     assert env["TRAFFICFUSE_LAB_FAULT_RATE_PERCENT"] == "50"
 
 
 def test_healthy_deployment_has_no_fault_rate() -> None:
     (deployment,) = _load("healthy-deployment.yaml")
-    env = {entry["name"]: entry["value"] for entry in _containers(deployment)[0]["env"]}
+    env = _literal_env(deployment)
     assert env["TRAFFICFUSE_LAB_MODE"] == "healthy"
     assert "TRAFFICFUSE_LAB_FAULT_RATE_PERCENT" not in env
+
+
+def test_deployments_expose_pod_name_only_through_downward_api() -> None:
+    # Routing evidence: responses report the serving Pod. The name comes from
+    # the Pod's own metadata, never from a literal or the node hostname.
+    for name in ("healthy-deployment.yaml", "faulty-deployment.yaml"):
+        (deployment,) = _load(name)
+        (entry,) = [
+            item
+            for item in _containers(deployment)[0]["env"]
+            if item["name"] == "TRAFFICFUSE_LAB_POD_NAME"
+        ]
+        assert entry == {
+            "name": "TRAFFICFUSE_LAB_POD_NAME",
+            "valueFrom": {"fieldRef": {"fieldPath": "metadata.name"}},
+        }
 
 
 def test_live_service_routes_to_faulty_initially() -> None:

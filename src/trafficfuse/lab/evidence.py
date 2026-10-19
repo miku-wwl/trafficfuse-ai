@@ -27,6 +27,8 @@ from datetime import datetime, timezone
 from typing import Any
 
 from trafficfuse.lab.probe import (
+    _SERVED_POD,
+    _SERVED_VERSION,
     EVIDENCE_SOURCE,
     OUTCOME_HTTP_ERROR,
     OUTCOME_MALFORMED,
@@ -240,6 +242,14 @@ def validate_evidence_document(document: Any) -> EvidenceValidationResult:
             duration = record.get("duration_ms")
             if isinstance(duration, bool) or not isinstance(duration, (int, float)) or duration < 0:
                 errors.append(f"records[{index}].duration_ms must be a number >= 0")
+            # Optional routing evidence (absent in earlier documents): null or
+            # the identifier shapes the probe itself accepts.
+            for key, pattern in (("served_version", _SERVED_VERSION), ("served_pod", _SERVED_POD)):
+                value = record.get(key)
+                if value is not None and (
+                    not isinstance(value, str) or not pattern.fullmatch(value)
+                ):
+                    errors.append(f"records[{index}].{key} must be null or a short identifier")
         if len(sequences) == len(records) and len(set(sequences)) != len(sequences):
             errors.append("records contain duplicate sequence numbers")
         if total is not None and sorted(sequences) != list(range(1, total + 1)):

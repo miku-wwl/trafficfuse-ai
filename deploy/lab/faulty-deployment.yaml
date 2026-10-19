@@ -40,6 +40,11 @@ spec:
               value: "50"
             - name: TRAFFICFUSE_LAB_PORT
               value: "8080"
+            # Downward API: responses report the serving Pod (routing evidence).
+            - name: TRAFFICFUSE_LAB_POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
           ports:
             - name: http
               containerPort: 8080

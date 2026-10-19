@@ -79,9 +79,24 @@ def test_probe_cli_stdout_yields_exactly_one_valid_document(capsys) -> None:
     assert document["scenario_id"] == "export-stdout"
     assert document["total_requests"] == 20
     assert document["success_count"] + document["error_count"] == 20
-    # Progress goes to stderr; the JSON document is the only stdout content.
-    assert "probing" in captured.err
+    # Single ordered stream (live Kind finding, session phase1b-001): progress
+    # precedes the document on stdout, the document is last, stderr is unused.
+    before, _, rest = out.partition(EVIDENCE_BEGIN_MARKER)
+    assert "probing" in before and "probe complete" in before
+    assert rest.rstrip().endswith(EVIDENCE_END_MARKER)
+    assert captured.err == ""
     assert json.loads(out.split(EVIDENCE_BEGIN_MARKER)[1].split(EVIDENCE_END_MARKER)[0])
+
+
+def test_merged_stream_interleaving_is_refused_not_repaired() -> None:
+    # Reproduces the live capture defect: a stderr line merged by `kubectl logs`
+    # inside the document must fail extraction (raw bytes are preserved by the
+    # exporter); the extractor never skips or repairs foreign lines.
+    lines = _captured_evidence().splitlines()
+    begin = lines.index(EVIDENCE_BEGIN_MARKER)
+    lines.insert(begin + 5, "probe complete: 40 success / 0 error (observed 0.0%)")
+    with pytest.raises(EvidenceFormatError, match="not valid JSON"):
+        extract_evidence_document("\n".join(lines) + "\n")
 
 
 def test_probe_cli_file_and_stdout_evidence_are_equivalent(tmp_path, capsys) -> None:

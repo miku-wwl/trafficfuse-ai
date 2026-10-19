@@ -1,11 +1,10 @@
 """Integration surface for the pinned Agentic Intent Gate runtime.
 
-Phase 0 scope: dependency pins and verification helpers only.
-
-Runtime composition (``ToolBinding`` / ``ToolCapability`` /
-``ExecutableRegistry`` / ``CapabilityVerifier`` / policy / ``open_runtime``)
-is Phase 3 work and is deliberately absent here. Model output can never
-reach these symbols: they live in trusted host code (AGENTS.md).
+Dependency pins and verification helpers. Runtime composition
+(``ToolBinding`` / ``ToolCapability`` / ``ExecutableRegistry`` /
+``CapabilityVerifier`` / policy / ``open_runtime``) lives in
+``trafficfuse.infrastructure.governance``. Model output can never reach these
+symbols: they live in trusted host code (AGENTS.md).
 """
 
 from __future__ import annotations

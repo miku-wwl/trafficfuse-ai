@@ -3,7 +3,7 @@
 Contains the synthetic lab workload, deterministic fault injection, the
 consumer-owned HTTP probe with strict evidence validation and durable export,
 and safety-guarded lifecycle planning with ownership verification. Nothing in
-this package mutates Kubernetes infrastructure; cluster creation and the
-future ``reroute_service_traffic`` executor belong to later phases
-(docs/PHASES.md).
+this package mutates Kubernetes infrastructure; the governed
+``reroute_service_traffic`` executor lives in
+``trafficfuse.infrastructure.reroute`` and runs only through the gate.
 """

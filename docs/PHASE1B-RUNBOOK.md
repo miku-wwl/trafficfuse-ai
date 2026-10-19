@@ -1,9 +1,16 @@
 # TrafficFuse AI — Phase 1B Operator Runbook
 
-**PHASE1B_READINESS=PARTIAL — DOCKER_BUILD_STATUS=BUILD_NOT_VERIFIED.**
-This sequence is prepared and checked offline. Docker build, Kind creation,
-deployment and in-cluster HTTP evidence have **not** been verified. Do not run
-this document automatically. Written, task-specific approval is required first.
+**EXECUTED 2026-10-19 with explicit approval — DOCKER_BUILD_STATUS=VERIFIED.**
+Steps 1–12 ran as written (session `phase1b-001`): image build, new
+`trafficfuse-lab`, creation record, image load, Namespace, live ownership
+verification (5/5), workloads, initial faulty selector and both probe Jobs.
+Step 13 failed closed for a real reason: `kubectl logs` merges a container's
+stdout and stderr, and a progress line was interleaved into the evidence
+document. The probe CLI now writes one ordered stdout stream; validated evidence
+was then collected with new, uniquely named probe Jobs (the original Job names
+exist and are preserved). Details: [AWARD-SPRINT-REPORT.md](AWARD-SPRINT-REPORT.md) §3–4.
+For day-to-day operation use [LIVE-DEMO-RUNBOOK.md](LIVE-DEMO-RUNBOOK.md). Do not
+run this document automatically; any re-run needs fresh, task-specific approval.
 See [the final hotfix report](PHASE1B-FINAL-HOTFIX-REPORT.md).
 
 ## Shell and exact identities

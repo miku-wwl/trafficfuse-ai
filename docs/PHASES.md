@@ -3,6 +3,10 @@
 Each phase ends at an explicit **PASS / PARTIAL / BLOCKED** gate. The next phase starts only
 after human authorization (AGENTS.md). No phase is started automatically.
 
+> **Award sprint (2026-10-19): Phases 1B–4 completed and verified on the live Kind lab;
+> Phase 5 PARTIAL.** One integrated sprint replaced further micro-phases. Evidence:
+> [AWARD-SPRINT-REPORT.md](AWARD-SPRINT-REPORT.md); handover: [CLAUDE-HANDOVER-REPORT.md](CLAUDE-HANDOVER-REPORT.md).
+
 ## Phase 0 — Foundation & Dependency Verification — **PASS (pending sign-off)**
 
 Goal: reproducible consumer foundation on top of the pinned Agentic Intent Gate v0.2.0.
@@ -61,7 +65,14 @@ credential disclosure removed — kubeconfig identity via the trusted local pars
 fingerprint only), redacted outputs, no raw kubeconfig view command. 327 offline tests green,
 1 skipped; see docs/PHASE1B-ENTRY-REVIEW.md.
 
-**Phase 1B (real cluster execution): PARTIAL — requires explicit authorization.** Remaining:
+**Phase 1B (real cluster execution): PASS (executed 2026-10-19 with explicit approval).** The
+image built (`sha256:fe0763a2…`), `trafficfuse-lab` was created with the dedicated kubeconfig,
+the creation record and live ownership verification passed, workloads became ready, and both
+probe scenarios ran. The first session exposed a real defect — `kubectl logs` merges stdout and
+stderr, interleaving a progress line into the evidence document; strict extraction failed closed
+and preserved the raw bytes. The probe now writes one ordered stdout stream, and the second
+session produced validated evidence (baseline 0%, live 50.0% errors, 40/40 served by `faulty`).
+Historical text of the pre-execution gate follows. Remaining at that time:
 explicit human authorization (creation + scoped deployment only; deletion excluded), the real
 image build with network, and running the probe scenarios against the live Services. The
 corrected operator sequence (PowerShell 7.4+, 15 ordered steps, STOP conditions,
@@ -81,7 +92,7 @@ cluster is created and destroyed deterministically; nothing left running afterwa
 **PARTIAL:** environment works but partial evidence. **BLOCKED:** report the exact blocker
 (e.g., container runtime unavailable).
 
-## Phase 2 — AI Diagnosis
+## Phase 2 — AI Diagnosis — **PASS (real model verified on live evidence)**
 
 Goal: evidence-grounded incident reasoning and bounded Plan generation.
 
@@ -93,7 +104,7 @@ Goal: evidence-grounded incident reasoning and bounded Plan generation.
 **PASS:** explanation cites collected evidence; Plan passes AIG validation; wrong-target and
 malformed Plans are rejected; tests run offline with synthetic evidence.
 
-## Phase 3 — Governed Execution
+## Phase 3 — Governed Execution — **PASS (one governed switch executed live, recovery verified)**
 
 Goal: the full governed action chain against the isolated Kind environment.
 
@@ -105,7 +116,7 @@ Goal: the full governed action chain against the isolated Kind environment.
 **PASS:** end-to-end chain executes one real bounded traffic switch in Kind with durable
 audit evidence; no retry on ambiguity; no production access by construction.
 
-## Phase 4 — Competition-Grade Product Experience
+## Phase 4 — Competition-Grade Product Experience — **PASS (dashboard working; browser smoke test PASS)**
 
 Goal: a demo-able product surface.
 
@@ -115,7 +126,7 @@ Goal: a demo-able product surface.
 
 **PASS:** full demo path visible in the UI against the live Kind lab.
 
-## Phase 5 — Demonstration & Submission
+## Phase 5 — Demonstration & Submission — **PARTIAL (materials prepared; video, slides file, commit/push and submission pending the owner)**
 
 Goal: official submission.
 

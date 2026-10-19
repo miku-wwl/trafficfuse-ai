@@ -14,8 +14,15 @@ Evidence output (Phase 1A.1, review finding P1):
 * The same complete JSON document is **always** printed to stdout, wrapped in
   the unambiguous ``TRAFFICFUSE_EVIDENCE_BEGIN`` / ``TRAFFICFUSE_EVIDENCE_END``
   markers, so automation can extract exactly one document from the Pod logs
-  even when the Pod's ephemeral volume is lost. Progress and diagnostics go to
-  stderr only and never contaminate the document.
+  even when the Pod's ephemeral volume is lost.
+* **Single ordered stream.** On the success path every line — progress before
+  the probe, the export notice and the completion summary — goes to stdout
+  *before* the marked document, which is written last. ``kubectl logs``
+  merges a container's stdout and stderr line by line in runtime read order,
+  so a stderr line can land inside a stdout document (observed in the first
+  live Kind run, session ``phase1b-001``). One pipe preserves write order.
+  stderr is reserved for fatal configuration/export/validation errors, where
+  no document is emitted.
 * Evidence is strictly validated before it is written or printed; invalid
   evidence fails closed (exit code 2).
 """
@@ -67,10 +74,11 @@ def main(argv: list[str] | None = None, *, transport: object | None = None) -> i
         sys.stderr.write(f"invalid probe configuration: {exc}\n")
         return 1
 
-    sys.stderr.write(
+    sys.stdout.write(
         f"probing {config.target_url} ({config.total_requests} requests, "
         f"concurrency {config.concurrency})\n"
     )
+    sys.stdout.flush()
     evidence = asyncio.run(run_probe(config, transport=transport))
     payload = evidence.to_json()
     document = evidence.to_dict()
@@ -90,13 +98,15 @@ def main(argv: list[str] | None = None, *, transport: object | None = None) -> i
         except OSError as exc:
             sys.stderr.write(f"evidence export FAILED to {output_path}: {exc}\n")
             return EXIT_OUTPUT_FAILED
-        sys.stderr.write(f"evidence written to {output_path}\n")
+        sys.stdout.write(f"evidence written to {output_path}\n")
 
-    sys.stdout.write(render_stdout_document(payload))
-    sys.stderr.write(
+    sys.stdout.write(
         f"probe complete: {evidence.success_count} success / {evidence.error_count} error "
         f"(observed {evidence.observed_error_percent}%)\n"
     )
+    # The marked document is the final output: nothing can follow it.
+    sys.stdout.write(render_stdout_document(payload))
+    sys.stdout.flush()
     return EXIT_OK
 
 

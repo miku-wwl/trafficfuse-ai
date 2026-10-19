@@ -15,6 +15,13 @@ invalid header) falls back to a per-process counter, which yields the exact
 distribution only for single-observation sequences; this fallback is a
 degradation of *global* exactness, never of determinism.
 
+Routing evidence: every ``/checkout`` response (success or synthetic failure)
+reports the serving ``version`` and, when the Kubernetes Downward API supplies
+``TRAFFICFUSE_LAB_POD_NAME``, the serving ``pod``. The probe records both per
+request, so evidence shows *which version actually served live traffic* before
+and after a traffic switch. The machine hostname is never used (offline runs
+report ``pod: null`` rather than leaking a workstation name).
+
 All responses are explicitly labelled synthetic. The checkout operation never
 touches a real payment or business system. Run in-cluster with::
 
@@ -26,6 +33,7 @@ from __future__ import annotations
 
 import itertools
 import os
+import re
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -42,6 +50,16 @@ MODE_HEALTHY = "healthy"
 MODE_FAULTY = "faulty"
 MODES = (MODE_HEALTHY, MODE_FAULTY)
 DEFAULT_LAB_PORT = 8080
+POD_NAME_ENV = "TRAFFICFUSE_LAB_POD_NAME"
+
+_POD_NAME = re.compile(r"^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$")
+
+
+def _validated_pod_name(raw: str | None) -> str | None:
+    """Accept only a DNS-1123 pod name from the Downward API; else ``None``."""
+    if raw is None or not _POD_NAME.fullmatch(raw):
+        return None
+    return raw
 
 
 def _parse_request_index(raw: str | None) -> int | None:
@@ -65,7 +83,12 @@ def _parse_request_index(raw: str | None) -> int | None:
     return value
 
 
-def create_lab_app(*, mode: str = MODE_HEALTHY, fault_rate_percent: int = DEFAULT_FAULT_RATE_PERCENT) -> FastAPI:
+def create_lab_app(
+    *,
+    mode: str = MODE_HEALTHY,
+    fault_rate_percent: int = DEFAULT_FAULT_RATE_PERCENT,
+    pod_name: str | None = None,
+) -> FastAPI:
     """Build the lab workload application for the given mode."""
     if mode not in MODES:
         raise ValueError(f"mode must be one of {MODES}, got {mode!r}")
@@ -74,6 +97,7 @@ def create_lab_app(*, mode: str = MODE_HEALTHY, fault_rate_percent: int = DEFAUL
             f"fault_rate_percent must be 0..100, got {fault_rate_percent!r}"
         )
 
+    pod = _validated_pod_name(pod_name)
     effective_rate = fault_rate_percent if mode == MODE_FAULTY else 0
     policy = FaultPolicy(rate_percent=effective_rate)
     counter = itertools.count(1)
@@ -94,6 +118,7 @@ def create_lab_app(*, mode: str = MODE_HEALTHY, fault_rate_percent: int = DEFAUL
         return {
             "component": "trafficfuse-lab-service",
             "version": mode,
+            "pod": pod,
             "platform_version": __version__,
             "workload": "synthetic",
         }
@@ -114,6 +139,7 @@ def create_lab_app(*, mode: str = MODE_HEALTHY, fault_rate_percent: int = DEFAUL
                     "status": "error",
                     "synthetic": True,
                     "version": mode,
+                    "pod": pod,
                     "request_number": index,
                     "request_sequence": sequence_source,
                     "detail": "synthetic faulty checkout (deterministic fault injection)",
@@ -123,6 +149,7 @@ def create_lab_app(*, mode: str = MODE_HEALTHY, fault_rate_percent: int = DEFAUL
             "status": "ok",
             "synthetic": True,
             "version": mode,
+            "pod": pod,
             "request_number": index,
             "request_sequence": sequence_source,
             "transaction_id": f"synthetic-checkout-{index}",
@@ -139,7 +166,10 @@ def _main() -> None:
     mode = os.environ.get("TRAFFICFUSE_LAB_MODE", MODE_HEALTHY)
     rate = int(os.environ.get("TRAFFICFUSE_LAB_FAULT_RATE_PERCENT", str(DEFAULT_FAULT_RATE_PERCENT)))
     port = int(os.environ.get("TRAFFICFUSE_LAB_PORT", str(DEFAULT_LAB_PORT)))
-    uvicorn.run(create_lab_app(mode=mode, fault_rate_percent=rate), host="0.0.0.0", port=port)
+    app = create_lab_app(
+        mode=mode, fault_rate_percent=rate, pod_name=os.environ.get(POD_NAME_ENV)
+    )
+    uvicorn.run(app, host="0.0.0.0", port=port)
 
 
 if __name__ == "__main__":  # pragma: no cover - exercised via container command

@@ -1,11 +1,10 @@
 """TrafficFuse AI — Evidence-Governed AI Release Circuit Breaker.
 
-Phase 0 foundation: a FastAPI consumer application built on top of the pinned
-Agentic Intent Gate v0.2.0 runtime. Incident evidence collection, AI diagnosis
-and governed Kubernetes execution arrive in later phases (see docs/PHASES.md).
-
-Nothing is faked: areas not yet implemented are empty packages with explicit
-ownership notes, not placeholder logic.
+A FastAPI consumer application built on the pinned Agentic Intent Gate v0.2.0
+runtime: real Kubernetes evidence, evidence-grounded local-model diagnosis, one
+governed traffic switch and independent recovery verification
+(docs/ARCHITECTURE.md). Synthetic, simulated and replayed data are always
+labelled; nothing is presented as more real than it is.
 """
 
 __version__ = "0.0.0"
